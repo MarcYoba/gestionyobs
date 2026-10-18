@@ -6,10 +6,12 @@ import 'package:path_provider/path_provider.dart';
 import 'config_service.dart';
 
 //import 'config_test_page.dart';
-import 'package:gestionyobs/security/login_page.dart';
+// import 'package:gestionyobs/security/login_page.dart';
+import 'package:gestionyobs/startup_page.dart';
 
 class ConfigPage extends StatefulWidget {
-  const ConfigPage({super.key});
+  final String? messageErreur;
+  const ConfigPage({super.key, this.messageErreur});
 
   @override
   State<ConfigPage> createState() => _ConfigPageState();
@@ -68,9 +70,15 @@ class _ConfigPageState extends State<ConfigPage> {
     // );
 
     // La configuration est enregistrée : on passe à la page de connexion
+    // Navigator.pushReplacement(
+    //   context,
+    //   MaterialPageRoute(builder: (_) => const LoginPage()),
+    // );
+
+    // Configuration enregistrée : on relance la logique de démarrage
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (_) => const LoginPage()),
+      MaterialPageRoute(builder: (_) => const StartupPage()),
     );
   }
 
@@ -104,6 +112,13 @@ class _ConfigPageState extends State<ConfigPage> {
                         'Cette configuration est demandée une seule fois, '
                         'au premier lancement du logiciel.',
                       ),
+                      if (widget.messageErreur != null) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          widget.messageErreur!,
+                          style: const TextStyle(color: Colors.red),
+                        ),
+                      ],
                       const SizedBox(height: 24),
 
                       // Type de base de données
