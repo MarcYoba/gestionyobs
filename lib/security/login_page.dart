@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../config_service.dart';
+import '../config_page.dart';
+
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
 
@@ -101,6 +104,19 @@ class _LoginPageState extends State<LoginPage> {
                         onPressed: _seConnecter,
                         child: const Text('Connexion'),
                       ),
+                    ),
+
+                    const SizedBox(height: 12),
+                    TextButton(
+                      onPressed: () async {
+                        await ConfigService.supprimer();
+                        if (!mounted) return;
+                        Navigator.pushReplacement(
+                          context,
+                          MaterialPageRoute(builder: (_) => const ConfigPage()),
+                        );
+                      },
+                      child: const Text('Reconfigurer (test)'),
                     ),
                   ],
                 ),

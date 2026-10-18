@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:gestionyobs/security/login_page.dart';
+
+import 'startup_page.dart';
 
 void main() {
   runApp(const MonApp());
@@ -11,13 +12,16 @@ class MonApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'YOBSTIE',
+      title: 'Gestion Provenderie',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
         useMaterial3: true,
       ),
-      home: const LoginPage(),
+      home: const StartupPage(),
+      // home: const LoginPage(),
+      //home: const ConfigTestPage(),
+      //home: const ConfigPage(),
     );
   }
 }
