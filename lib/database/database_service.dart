@@ -123,21 +123,35 @@ class DatabaseService {
     return n > 0;
   }
 
-  static Future<void> creerUtilisateur({
+  // creation de l'utilisateur du systeme
+  static Future<int> creerUtilisateur({
     required String nomComplet,
     required String identifiant,
     required String motDePasse,
     required String role,
+    List<int> agenceIds = const [],
   }) async {
     final hash = BCrypt.hashpw(motDePasse, BCrypt.gensalt());
 
-    await db.insert('utilisateurs', {
-      'nom_complet': nomComplet,
-      'identifiant': identifiant,
-      'mot_de_passe_hash': hash,
-      'role': role,
-      'actif': 1,
-      'cree_le': DateTime.now().toIso8601String(),
+    // Transaction : soit tout est enregistré, soit rien
+    return db.transaction((txn) async {
+      final id = await txn.insert('utilisateurs', {
+        'nom_complet': nomComplet,
+        'identifiant': identifiant,
+        'mot_de_passe_hash': hash,
+        'role': role,
+        'actif': 1,
+        'cree_le': DateTime.now().toIso8601String(),
+      });
+
+      for (final agenceId in agenceIds) {
+        await txn.insert('utilisateur_agences', {
+          'utilisateur_id': id,
+          'agence_id': agenceId,
+        });
+      }
+
+      return id;
     });
   }
 
@@ -222,6 +236,110 @@ class DatabaseService {
       ville: villeNettoyee,
       telephone: telNettoye,
       description: descriptionNettoyee,
+    );
+  }
+
+  // Liste de tous les utilisateurs, avec le nom de leurs agences
+  static Future<List<UtilisateurResume>> listerUtilisateurs() async {
+    final lignes = await db.rawQuery('''
+      SELECT u.id, u.nom_complet, u.identifiant, u.role, u.actif,
+             GROUP_CONCAT(a.nom, ', ') AS agences
+      FROM utilisateurs u
+      LEFT JOIN utilisateur_agences ua ON ua.utilisateur_id = u.id
+      LEFT JOIN agences a ON a.id = ua.agence_id
+      GROUP BY u.id
+      ORDER BY u.nom_complet
+    ''');
+
+    return lignes
+        .map(
+          (m) => UtilisateurResume(
+            id: m['id'] as int,
+            nomComplet: m['nom_complet'] as String,
+            identifiant: m['identifiant'] as String,
+            role: m['role'] as String,
+            actif: (m['actif'] as int) == 1,
+            agences: (m['agences'] as String?) ?? '',
+          ),
+        )
+        .toList();
+  }
+
+  // Les numéros des agences auxquelles cet utilisateur est affilié
+  static Future<Set<int>> agenceIdsDeUtilisateur(int utilisateurId) async {
+    final lignes = await db.query(
+      'utilisateur_agences',
+      columns: ['agence_id'],
+      where: 'utilisateur_id = ?',
+      whereArgs: [utilisateurId],
+    );
+    return lignes.map((m) => m['agence_id'] as int).toSet();
+  }
+
+  static Future<void> modifierUtilisateur({
+    required int id,
+    required String nomComplet,
+    required String role,
+    required bool actif,
+    required List<int> agenceIds,
+  }) async {
+    await db.transaction((txn) async {
+      final actuel = await txn.query(
+        'utilisateurs',
+        columns: ['role', 'actif'],
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (actuel.isEmpty) throw Exception('Utilisateur introuvable');
+
+      // Sécurité : il doit toujours rester un administrateur actif
+      final etaitAdminActif =
+          actuel.first['role'] == 'admin' && actuel.first['actif'] == 1;
+      if (etaitAdminActif && (role != 'admin' || !actif)) {
+        final r = await txn.rawQuery(
+          "SELECT COUNT(*) AS n FROM utilisateurs WHERE role = 'admin' AND actif = 1",
+        );
+        if ((r.first['n'] as int) <= 1) {
+          throw Exception('Il doit rester au moins un administrateur actif');
+        }
+      }
+
+      await txn.update(
+        'utilisateurs',
+        {'nom_complet': nomComplet, 'role': role, 'actif': actif ? 1 : 0},
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+
+      // On remplace les affiliations : on efface les anciennes, puis on
+      // enregistre les nouvelles (aucune pour un administrateur)
+      await txn.delete(
+        'utilisateur_agences',
+        where: 'utilisateur_id = ?',
+        whereArgs: [id],
+      );
+      if (role != 'admin') {
+        for (final agenceId in agenceIds) {
+          await txn.insert('utilisateur_agences', {
+            'utilisateur_id': id,
+            'agence_id': agenceId,
+          });
+        }
+      }
+    });
+  }
+
+  static Future<void> reinitialiserMotDePasse(
+    int id,
+    String nouveauMotDePasse,
+  ) async {
+    final hash = BCrypt.hashpw(nouveauMotDePasse, BCrypt.gensalt());
+    await db.update(
+      'utilisateurs',
+      {'mot_de_passe_hash': hash},
+      where: 'id = ?',
+      whereArgs: [id],
     );
   }
 }

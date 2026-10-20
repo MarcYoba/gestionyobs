@@ -1,3 +1,14 @@
+/// Les rôles disponibles : code enregistré dans la base -> texte affiché.
+const Map<String, String> rolesDisponibles = {
+  'vendeur': 'Vendeur',
+  'comptable': 'Comptable',
+  'magasinier': 'Magasinier',
+  'admin': 'Administrateur',
+};
+
+/// Le texte à afficher pour un rôle (ou le code lui-même s'il est inconnu).
+String libelleRole(String role) => rolesDisponibles[role] ?? role;
+
 /// Un utilisateur du logiciel.
 class Utilisateur {
   final int id;
@@ -50,4 +61,25 @@ class Session {
     utilisateurCourant = null;
     agenceCourante = null;
   }
+}
+
+/// Une ligne de la liste des utilisateurs (avec les noms de ses agences).
+class UtilisateurResume {
+  final int id;
+  final String nomComplet;
+  final String identifiant;
+  final String role;
+  final bool actif;
+  final String agences; // noms séparés par des virgules ('' si aucune)
+
+  const UtilisateurResume({
+    required this.id,
+    required this.nomComplet,
+    required this.identifiant,
+    required this.role,
+    required this.actif,
+    required this.agences,
+  });
+
+  bool get estAdmin => role == 'admin';
 }

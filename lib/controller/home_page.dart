@@ -4,6 +4,8 @@ import 'package:gestionyobs/security/login_page.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
 import 'package:gestionyobs/controller/apres_connexion_page.dart';
 
+import 'utilisateurs_page.dart';
+
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
 
@@ -16,6 +18,15 @@ class HomePage extends StatelessWidget {
       appBar: AppBar(
         title: Text(agence == null ? 'Accueil' : 'Accueil - ${agence.nom}'),
         actions: [
+          if (utilisateur.estAdmin)
+            IconButton(
+              icon: const Icon(Icons.people),
+              tooltip: 'Utilisateurs',
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const UtilisateursPage()),
+              ),
+            ),
           IconButton(
             icon: const Icon(Icons.swap_horiz),
             tooltip: "Changer d'agence",
@@ -56,11 +67,7 @@ class HomePage extends StatelessWidget {
             Wrap(
               spacing: 8,
               children: [
-                Chip(
-                  label: Text(
-                    utilisateur.estAdmin ? 'Administrateur' : 'Vendeur',
-                  ),
-                ),
+                Chip(label: Text(libelleRole(utilisateur.role))),
                 if (agence != null)
                   Chip(
                     avatar: const Icon(Icons.store, size: 18),
