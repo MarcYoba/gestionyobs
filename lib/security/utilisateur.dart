@@ -1,10 +1,8 @@
 /// Les rôles disponibles : code enregistré dans la base -> texte affiché.
-const Map<String, String> rolesDisponibles = {
-  'vendeur': 'Vendeur',
-  'comptable': 'Comptable',
-  'magasinier': 'Magasinier',
-  'admin': 'Administrateur',
-};
+/// Les rôles disponibles : code -> libellé.
+/// Cette liste est remplie depuis la base de données au démarrage
+/// et à chaque modification des rôles.
+final Map<String, String> rolesDisponibles = {};
 
 /// Le texte à afficher pour un rôle (ou le code lui-même s'il est inconnu).
 String libelleRole(String role) => rolesDisponibles[role] ?? role;
@@ -53,13 +51,19 @@ class Agence {
 }
 
 /// Retient l'utilisateur et l'agence choisie tant que le logiciel est ouvert.
+/// Retient l'utilisateur, son agence et ses droits tant que le logiciel est ouvert.
 class Session {
   static Utilisateur? utilisateurCourant;
   static Agence? agenceCourante;
+  static Set<String> droits = {};
+
+  // L'utilisateur connecté a-t-il ce droit ?
+  static bool peut(String permission) => droits.contains(permission);
 
   static void deconnecter() {
     utilisateurCourant = null;
     agenceCourante = null;
+    droits = {};
   }
 }
 

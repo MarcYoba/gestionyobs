@@ -5,6 +5,8 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:gestionyobs/config_service.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
+import 'package:gestionyobs/permissions/permissions_catalogue.dart';
+import 'package:gestionyobs/security/role.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -13,8 +15,10 @@ class DatabaseService {
   static bool _ffiInitialise = false;
 
   // Numéro de version de la structure de la base.
-  // Version 1 : table utilisateurs. Version 2 : agences + affiliations+ mise ajour agence.
-  static const int _versionBase = 3;
+  // Version 1 : table utilisateurs.
+  //Version 2 : agences + affiliations+ mise ajour agence.
+  // Version 4 : rôles, permissions et droits des rôles.
+  static const int _versionBase = 4;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -34,28 +38,33 @@ class DatabaseService {
       config.cheminBase,
       options: OpenDatabaseOptions(
         version: _versionBase,
-        // Active le contrôle des liens entre tables
         onConfigure: (db) async {
           await db.execute('PRAGMA foreign_keys = ON');
         },
-        // Base toute neuve : on crée toutes les tables
         onCreate: (db, version) async {
           await _creerTableUtilisateurs(db);
           await _creerTablesAgences(db);
+          await _creerTablesRoles(db);
+          await _initialiserRoles(db);
         },
-        // Base existante plus ancienne : on ajoute seulement ce qui manque
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
-            // _creerTablesAgences contient déjà la colonne description
             await _creerTablesAgences(db);
           }
-          // On n'ajoute la colonne que si elle n'existe pas encore
           if (!await _colonneExiste(db, 'agences', 'description')) {
             await db.execute('ALTER TABLE agences ADD COLUMN description TEXT');
+          }
+          if (ancienneVersion < 4) {
+            await _creerTablesRoles(db);
+            await _initialiserRoles(db);
           }
         },
       ),
     );
+
+    // À chaque démarrage : le catalogue du code est recopié dans la base
+    await _synchroniserPermissions(_db!);
+    await rafraichirRoles();
   }
 
   static Future<void> _creerTableUtilisateurs(Database db) async {
@@ -341,5 +350,325 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  static Future<void> _creerTablesRoles(Database db) async {
+    await db.execute('''
+      CREATE TABLE roles (
+        code TEXT PRIMARY KEY,
+        libelle TEXT NOT NULL UNIQUE,
+        systeme INTEGER NOT NULL DEFAULT 0,
+        cree_le TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE permissions (
+        code TEXT PRIMARY KEY,
+        libelle TEXT NOT NULL,
+        groupe TEXT NOT NULL,
+        admin_seulement INTEGER NOT NULL DEFAULT 0,
+        ordre INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE role_permissions (
+        role_code TEXT NOT NULL,
+        permission_code TEXT NOT NULL,
+        PRIMARY KEY (role_code, permission_code),
+        FOREIGN KEY (role_code) REFERENCES roles(code) ON DELETE CASCADE,
+        FOREIGN KEY (permission_code) REFERENCES permissions(code) ON DELETE CASCADE
+      )
+    ''');
+  }
+
+  // Crée les rôles de base et leurs droits de départ
+  static Future<void> _initialiserRoles(Database db) async {
+    // Les permissions doivent exister avant d'être accordées
+    await _synchroniserPermissions(db);
+
+    final maintenant = DateTime.now().toIso8601String();
+    final roles = <Map<String, Object>>[
+      {'code': 'admin', 'libelle': 'Administrateur', 'systeme': 1},
+      {'code': 'vendeur', 'libelle': 'Vendeur', 'systeme': 0},
+      {'code': 'comptable', 'libelle': 'Comptable', 'systeme': 0},
+      {'code': 'magasinier', 'libelle': 'Magasinier', 'systeme': 0},
+    ];
+
+    for (final role in roles) {
+      await db.insert('roles', {
+        ...role,
+        'cree_le': maintenant,
+      }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    }
+
+    for (final entree in droitsParDefaut.entries) {
+      for (final permission in entree.value) {
+        await db.insert('role_permissions', {
+          'role_code': entree.key,
+          'permission_code': permission,
+        }, conflictAlgorithm: ConflictAlgorithm.ignore);
+      }
+    }
+  }
+
+  // Recopie le catalogue du code dans la table permissions
+  static Future<void> _synchroniserPermissions(Database db) async {
+    for (var i = 0; i < cataloguePermissions.length; i++) {
+      final p = cataloguePermissions[i];
+      await db.execute(
+        '''
+        INSERT INTO permissions (code, libelle, groupe, admin_seulement, ordre)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(code) DO UPDATE SET
+          libelle = excluded.libelle,
+          groupe = excluded.groupe,
+          admin_seulement = excluded.admin_seulement,
+          ordre = excluded.ordre
+      ''',
+        [p.code, p.libelle, p.groupe, p.adminSeulement ? 1 : 0, i],
+      );
+    }
+
+    // On supprime les permissions qui ne sont plus dans le code
+    final codes = cataloguePermissions.map((p) => p.code).toList();
+    final marques = List.filled(codes.length, '?').join(', ');
+    await db.delete(
+      'permissions',
+      where: 'code NOT IN ($marques)',
+      whereArgs: codes,
+    );
+  }
+
+  // Les droits d'un rôle (l'administrateur a toutes les permissions)
+  static Future<Set<String>> droitsDuRole(String roleCode) async {
+    if (roleCode == 'admin') {
+      final lignes = await db.query('permissions', columns: ['code']);
+      return lignes.map((m) => m['code'] as String).toSet();
+    }
+
+    final lignes = await db.query(
+      'role_permissions',
+      columns: ['permission_code'],
+      where: 'role_code = ?',
+      whereArgs: [roleCode],
+    );
+    return lignes.map((m) => m['permission_code'] as String).toSet();
+  }
+
+  // ---------- Rôles et droits ----------
+
+  // Recharge la liste des rôles en mémoire (listes déroulantes, libellés)
+  static Future<void> rafraichirRoles() async {
+    final lignes = await db.query('roles', orderBy: 'systeme, libelle');
+    rolesDisponibles
+      ..clear()
+      ..addEntries(
+        lignes.map(
+          (m) => MapEntry(m['code'] as String, m['libelle'] as String),
+        ),
+      );
+  }
+
+  static Future<List<Role>> listerRoles() async {
+    final lignes = await db.rawQuery('''
+      SELECT r.code, r.libelle, r.systeme,
+             (SELECT COUNT(*) FROM utilisateurs u WHERE u.role = r.code) AS nb
+      FROM roles r
+      ORDER BY r.systeme, r.libelle
+    ''');
+
+    return lignes
+        .map(
+          (m) => Role(
+            code: m['code'] as String,
+            libelle: m['libelle'] as String,
+            systeme: (m['systeme'] as int) == 1,
+            nbUtilisateurs: m['nb'] as int,
+          ),
+        )
+        .toList();
+  }
+
+  static Future<List<Permission>> listerPermissions() async {
+    final lignes = await db.query('permissions', orderBy: 'ordre');
+    return lignes
+        .map(
+          (m) => Permission(
+            code: m['code'] as String,
+            libelle: m['libelle'] as String,
+            groupe: m['groupe'] as String,
+            adminSeulement: (m['admin_seulement'] as int) == 1,
+          ),
+        )
+        .toList();
+  }
+
+  // Toutes les paires accordées, sous la forme "role|permission"
+  static Future<Set<String>> droitsAccordes() async {
+    final lignes = await db.query('role_permissions');
+    return lignes
+        .map((m) => '${m['role_code']}|${m['permission_code']}')
+        .toSet();
+  }
+
+  static Future<void> definirDroit(
+    String roleCode,
+    String permissionCode,
+    bool accorde,
+  ) async {
+    if (roleCode == 'admin') {
+      throw Exception("Les droits de l'administrateur ne sont pas modifiables");
+    }
+
+    if (accorde) {
+      final p = await db.query(
+        'permissions',
+        columns: ['admin_seulement'],
+        where: 'code = ?',
+        whereArgs: [permissionCode],
+        limit: 1,
+      );
+      if (p.isEmpty) throw Exception('Permission inconnue');
+      if (p.first['admin_seulement'] == 1) {
+        throw Exception("Cette permission est réservée à l'administrateur");
+      }
+
+      await db.insert('role_permissions', {
+        'role_code': roleCode,
+        'permission_code': permissionCode,
+      }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    } else {
+      await db.delete(
+        'role_permissions',
+        where: 'role_code = ? AND permission_code = ?',
+        whereArgs: [roleCode, permissionCode],
+      );
+    }
+  }
+
+  // Vérifie qu'aucun autre rôle ne porte déjà ce nom
+  static Future<void> _verifierLibelleLibre(
+    String libelle, {
+    String? sauf,
+  }) async {
+    final lignes = await db.query(
+      'roles',
+      columns: ['code'],
+      where: sauf == null
+          ? 'LOWER(libelle) = LOWER(?)'
+          : 'LOWER(libelle) = LOWER(?) AND code != ?',
+      whereArgs: sauf == null ? [libelle] : [libelle, sauf],
+    );
+    if (lignes.isNotEmpty) throw Exception('Un rôle porte déjà ce nom');
+  }
+
+  // Fabrique un code simple à partir d'un nom : "Chef de rayon" -> "chef_de_rayon"
+  static String _versCode(String texte) {
+    const accents = {
+      'à': 'a',
+      'â': 'a',
+      'ä': 'a',
+      'é': 'e',
+      'è': 'e',
+      'ê': 'e',
+      'ë': 'e',
+      'î': 'i',
+      'ï': 'i',
+      'ô': 'o',
+      'ö': 'o',
+      'ù': 'u',
+      'û': 'u',
+      'ü': 'u',
+      'ç': 'c',
+    };
+    var t = texte.toLowerCase();
+    accents.forEach((a, b) => t = t.replaceAll(a, b));
+    t = t.replaceAll(RegExp(r'[^a-z0-9]+'), '_');
+    t = t.replaceAll(RegExp(r'^_+|_+$'), '');
+    return t.isEmpty ? 'role' : t;
+  }
+
+  static Future<void> creerRole(String libelle) async {
+    final propre = libelle.trim();
+    if (propre.isEmpty) throw Exception('Le nom du rôle est vide');
+    await _verifierLibelleLibre(propre);
+
+    // Le code doit être unique : on ajoute un numéro si besoin
+    final base = _versCode(propre);
+    var code = base;
+    var numero = 2;
+    while ((await db.query(
+      'roles',
+      columns: ['code'],
+      where: 'code = ?',
+      whereArgs: [code],
+    )).isNotEmpty) {
+      code = '${base}_$numero';
+      numero++;
+    }
+
+    await db.insert('roles', {
+      'code': code,
+      'libelle': propre,
+      'systeme': 0,
+      'cree_le': DateTime.now().toIso8601String(),
+    });
+    await rafraichirRoles();
+  }
+
+  static Future<void> renommerRole(String code, String nouveauLibelle) async {
+    final propre = nouveauLibelle.trim();
+    if (propre.isEmpty) throw Exception('Le nom du rôle est vide');
+
+    final role = await db.query(
+      'roles',
+      where: 'code = ?',
+      whereArgs: [code],
+      limit: 1,
+    );
+    if (role.isEmpty) throw Exception('Rôle introuvable');
+    if (role.first['systeme'] == 1) {
+      throw Exception('Un rôle système ne peut pas être renommé');
+    }
+
+    await _verifierLibelleLibre(propre, sauf: code);
+    await db.update(
+      'roles',
+      {'libelle': propre},
+      where: 'code = ?',
+      whereArgs: [code],
+    );
+    await rafraichirRoles();
+  }
+
+  static Future<void> supprimerRole(String code) async {
+    final role = await db.query(
+      'roles',
+      where: 'code = ?',
+      whereArgs: [code],
+      limit: 1,
+    );
+    if (role.isEmpty) throw Exception('Rôle introuvable');
+    if (role.first['systeme'] == 1) {
+      throw Exception('Un rôle système ne peut pas être supprimé');
+    }
+
+    final r = await db.rawQuery(
+      'SELECT COUNT(*) AS n FROM utilisateurs WHERE role = ?',
+      [code],
+    );
+    final nb = r.first['n'] as int;
+    if (nb > 0) {
+      throw Exception(
+        "Ce rôle est utilisé par $nb utilisateur(s). "
+        "Changez d'abord leur rôle.",
+      );
+    }
+
+    // Les droits du rôle disparaissent avec lui (ON DELETE CASCADE)
+    await db.delete('roles', where: 'code = ?', whereArgs: [code]);
+    await rafraichirRoles();
   }
 }

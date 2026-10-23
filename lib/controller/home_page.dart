@@ -6,6 +6,8 @@ import 'package:gestionyobs/controller/apres_connexion_page.dart';
 
 import 'utilisateurs_page.dart';
 
+import 'package:gestionyobs/permissions/roles_droits_page.dart';
+
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
 
@@ -18,13 +20,22 @@ class HomePage extends StatelessWidget {
       appBar: AppBar(
         title: Text(agence == null ? 'Accueil' : 'Accueil - ${agence.nom}'),
         actions: [
-          if (utilisateur.estAdmin)
+          if (Session.peut('utilisateurs.gerer'))
             IconButton(
               icon: const Icon(Icons.people),
               tooltip: 'Utilisateurs',
               onPressed: () => Navigator.push(
                 context,
                 MaterialPageRoute(builder: (_) => const UtilisateursPage()),
+              ),
+            ),
+          if (Session.peut('droits.gerer'))
+            IconButton(
+              icon: const Icon(Icons.admin_panel_settings),
+              tooltip: 'Rôles et droits',
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const RolesDroitsPage()),
               ),
             ),
           IconButton(
@@ -74,6 +85,28 @@ class HomePage extends StatelessWidget {
                     label: Text('Agence : ${agence.nom}'),
                   ),
               ],
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              'Mes droits (provisoire)',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: 640,
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                alignment: WrapAlignment.center,
+                children: (Session.droits.toList()..sort())
+                    .map(
+                      (d) => Chip(
+                        label: Text(d),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    )
+                    .toList(),
+              ),
             ),
           ],
         ),

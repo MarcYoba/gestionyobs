@@ -58,6 +58,7 @@ class _LoginPageState extends State<LoginPage> {
 
       // Connexion réussie : on retient l'utilisateur et on ouvre l'accueil
       Session.utilisateurCourant = utilisateur;
+      Session.droits = await DatabaseService.droitsDuRole(utilisateur.role);
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => const ApresConnexionPage()),

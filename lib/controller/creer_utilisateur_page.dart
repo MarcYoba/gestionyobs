@@ -18,7 +18,7 @@ class _CreerUtilisateurPageState extends State<CreerUtilisateurPage> {
   final _motDePasseController = TextEditingController();
   final _confirmationController = TextEditingController();
 
-  String _role = 'vendeur';
+  late String _role;
   bool _masquer = true;
   bool _chargement = false;
   String? _erreur;
@@ -29,6 +29,11 @@ class _CreerUtilisateurPageState extends State<CreerUtilisateurPage> {
   @override
   void initState() {
     super.initState();
+    // Premier rôle de la liste qui n'est pas administrateur
+    _role = rolesDisponibles.keys.firstWhere(
+      (code) => code != 'admin',
+      orElse: () => 'admin',
+    );
     _chargerAgences();
   }
 
