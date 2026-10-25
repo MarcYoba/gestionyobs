@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import 'package:gestionyobs/database/database_service.dart';
 import 'package:gestionyobs/security/role.dart';
+import 'package:gestionyobs/error/acces_refuse.dart';
+import 'package:gestionyobs/security/utilisateur.dart';
 
 class RolesDroitsPage extends StatefulWidget {
   const RolesDroitsPage({super.key});
@@ -294,6 +296,12 @@ class _RolesDroitsPageState extends State<RolesDroitsPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (!Session.peut('droits.gerer')) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Rôles et droits')),
+        body: const AccesRefuse(),
+      );
+    }
     return Scaffold(
       appBar: AppBar(title: const Text('Rôles et droits')),
       body: _chargement

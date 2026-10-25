@@ -140,6 +140,11 @@ class DatabaseService {
     required String role,
     List<int> agenceIds = const [],
   }) async {
+    // Le premier compte (administrateur) se crée sans être connecté
+    if (await aDesUtilisateurs()) {
+      Session.exiger('utilisateurs.gerer');
+    }
+
     final hash = BCrypt.hashpw(motDePasse, BCrypt.gensalt());
 
     // Transaction : soit tout est enregistré, soit rien
@@ -226,6 +231,7 @@ class DatabaseService {
     String? telephone,
     String? description,
   }) async {
+    Session.exiger('agences.gerer');
     final villeNettoyee = _videEnNull(ville);
     final telNettoye = _videEnNull(telephone);
     final descriptionNettoyee = _videEnNull(description);
@@ -292,6 +298,7 @@ class DatabaseService {
     required bool actif,
     required List<int> agenceIds,
   }) async {
+    Session.exiger('utilisateurs.gerer');
     await db.transaction((txn) async {
       final actuel = await txn.query(
         'utilisateurs',
@@ -343,6 +350,7 @@ class DatabaseService {
     int id,
     String nouveauMotDePasse,
   ) async {
+    Session.exiger('utilisateurs.gerer');
     final hash = BCrypt.hashpw(nouveauMotDePasse, BCrypt.gensalt());
     await db.update(
       'utilisateurs',
@@ -518,6 +526,7 @@ class DatabaseService {
     String permissionCode,
     bool accorde,
   ) async {
+    Session.exiger('droits.gerer');
     if (roleCode == 'admin') {
       throw Exception("Les droits de l'administrateur ne sont pas modifiables");
     }
@@ -591,6 +600,7 @@ class DatabaseService {
   }
 
   static Future<void> creerRole(String libelle) async {
+    Session.exiger('droits.gerer');
     final propre = libelle.trim();
     if (propre.isEmpty) throw Exception('Le nom du rôle est vide');
     await _verifierLibelleLibre(propre);
@@ -619,6 +629,7 @@ class DatabaseService {
   }
 
   static Future<void> renommerRole(String code, String nouveauLibelle) async {
+    Session.exiger('droits.gerer');
     final propre = nouveauLibelle.trim();
     if (propre.isEmpty) throw Exception('Le nom du rôle est vide');
 
@@ -644,6 +655,7 @@ class DatabaseService {
   }
 
   static Future<void> supprimerRole(String code) async {
+    Session.exiger('droits.gerer');
     final role = await db.query(
       'roles',
       where: 'code = ?',

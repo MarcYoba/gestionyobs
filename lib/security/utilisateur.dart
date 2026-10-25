@@ -65,6 +65,13 @@ class Session {
     agenceCourante = null;
     droits = {};
   }
+
+  // Interrompt l'opération si l'utilisateur n'a pas le droit
+  static void exiger(String permission) {
+    if (!peut(permission)) {
+      throw Exception('Action non autorisée');
+    }
+  }
 }
 
 /// Une ligne de la liste des utilisateurs (avec les noms de ses agences).

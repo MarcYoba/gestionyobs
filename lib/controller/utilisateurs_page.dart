@@ -3,8 +3,8 @@ import 'package:flutter/material.dart';
 import 'creer_utilisateur_page.dart';
 
 import 'package:gestionyobs/database/database_service.dart';
-
 import 'package:gestionyobs/security/utilisateur.dart';
+import 'package:gestionyobs/error/acces_refuse.dart';
 
 import 'modifier_utilisateur_page.dart';
 
@@ -65,6 +65,12 @@ class _UtilisateursPageState extends State<UtilisateursPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (!Session.peut('utilisateurs.gerer')) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Utilisateurs')),
+        body: const AccesRefuse(),
+      );
+    }
     return Scaffold(
       appBar: AppBar(title: const Text('Utilisateurs')),
       floatingActionButton: FloatingActionButton.extended(
