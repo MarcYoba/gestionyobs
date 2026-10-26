@@ -98,7 +98,7 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                       const SizedBox(height: 16),
                       const Text(
-                        'Gestion Provenderie',
+                        'YOBS ENTREPRISES',
                         style: TextStyle(
                           fontSize: 26,
                           fontWeight: FontWeight.bold,

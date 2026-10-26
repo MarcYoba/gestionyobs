@@ -7,6 +7,7 @@ import 'package:gestionyobs/config_service.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
 import 'package:gestionyobs/permissions/permissions_catalogue.dart';
 import 'package:gestionyobs/security/role.dart';
+import 'package:gestionyobs/modules/article.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -18,7 +19,9 @@ class DatabaseService {
   // Version 1 : table utilisateurs.
   //Version 2 : agences + affiliations+ mise ajour agence.
   // Version 4 : rôles, permissions et droits des rôles.
-  static const int _versionBase = 4;
+  //static const int _versionBase = 4;
+  // Version 5 : table des articles.
+  static const int _versionBase = 5;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -46,6 +49,7 @@ class DatabaseService {
           await _creerTablesAgences(db);
           await _creerTablesRoles(db);
           await _initialiserRoles(db);
+          await _creerTableArticles(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -57,6 +61,9 @@ class DatabaseService {
           if (ancienneVersion < 4) {
             await _creerTablesRoles(db);
             await _initialiserRoles(db);
+          }
+          if (ancienneVersion < 5) {
+            await _creerTableArticles(db);
           }
         },
       ),
@@ -683,4 +690,159 @@ class DatabaseService {
     await db.delete('roles', where: 'code = ?', whereArgs: [code]);
     await rafraichirRoles();
   }
+
+  // ---------- Articles ----------
+
+  static Future<void> _creerTableArticles(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS articles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        designation TEXT NOT NULL,
+        categorie TEXT,
+        unite TEXT NOT NULL DEFAULT 'pièce',
+        prix_achat INTEGER,
+        prix_vente INTEGER NOT NULL DEFAULT 0,
+        seuil_alerte REAL NOT NULL DEFAULT 0,
+        actif INTEGER NOT NULL DEFAULT 1,
+        cree_le TEXT NOT NULL
+      )
+    ''');
+  }
+
+  static Future<List<Article>> listerArticles({
+    String recherche = '',
+    bool inclureInactifs = false,
+  }) async {
+    if (!Session.peut('articles.voir') && !Session.peut('articles.gerer')) {
+      throw Exception('Action non autorisée');
+    }
+
+    final conditions = <String>[];
+    final args = <Object>[];
+
+    if (!inclureInactifs) conditions.add('actif = 1');
+
+    final texte = recherche.trim();
+    if (texte.isNotEmpty) {
+      conditions.add('(code LIKE ? OR designation LIKE ? OR categorie LIKE ?)');
+      args.addAll(['%$texte%', '%$texte%', '%$texte%']);
+    }
+
+    final lignes = await db.query(
+      'articles',
+      where: conditions.isEmpty ? null : conditions.join(' AND '),
+      whereArgs: args.isEmpty ? null : args,
+      orderBy: 'designation COLLATE NOCASE',
+    );
+
+    // Le prix d'achat n'est lu que pour ceux qui ont le droit de le voir
+    final voirPrixAchat = Session.peut('achats.prix_achat_voir');
+    return lignes
+        .map((m) => Article.fromMap(m, avecPrixAchat: voirPrixAchat))
+        .toList();
+  }
+
+  // Les catégories déjà utilisées (pour les proposer à la saisie)
+  static Future<List<String>> categoriesArticles() async {
+    final lignes = await db.rawQuery('''
+      SELECT DISTINCT categorie FROM articles
+      WHERE categorie IS NOT NULL AND categorie != ''
+      ORDER BY categorie COLLATE NOCASE
+    ''');
+    return lignes.map((m) => m['categorie'] as String).toList();
+  }
+
+  // Retourne le matricule attribué à l'article
+  static Future<String> creerArticle({
+    required String designation,
+    String? categorie,
+    required String unite,
+    int? prixAchat,
+    required int prixVente,
+    required double seuilAlerte,
+  }) async {
+    Session.exiger('articles.gerer');
+
+    // Transaction : le numéro est calculé et utilisé sans que rien
+    // ne puisse s'intercaler entre les deux
+    return db.transaction((txn) async {
+      final code = await _prochainMatricule(txn, 'articles');
+
+      await txn.insert('articles', {
+        'code': code,
+        'designation': designation,
+        'categorie': _videEnNull(categorie),
+        'unite': unite,
+        'prix_achat': Session.peut('achats.prix_achat_voir') ? prixAchat : null,
+        'prix_vente': prixVente,
+        'seuil_alerte': seuilAlerte,
+        'actif': 1,
+        'cree_le': DateTime.now().toIso8601String(),
+      });
+
+      return code;
+    });
+  }
+
+  static Future<void> modifierArticle({
+    required int id,
+    required String designation,
+    String? categorie,
+    required String unite,
+    int? prixAchat,
+    required int prixVente,
+    required double seuilAlerte,
+    required bool actif,
+  }) async {
+    Session.exiger('articles.gerer');
+
+    final valeurs = <String, Object?>{
+      'designation': designation,
+      'categorie': _videEnNull(categorie),
+      'unite': unite,
+      'prix_vente': prixVente,
+      'seuil_alerte': seuilAlerte,
+      'actif': actif ? 1 : 0,
+    };
+
+    // Sans le droit de voir les prix d'achat, on ne les modifie pas
+    if (Session.peut('achats.prix_achat_voir')) {
+      valeurs['prix_achat'] = prixAchat;
+    }
+
+    await db.update('articles', valeurs, where: 'id = ?', whereArgs: [id]);
+  }
+
+  // Matricule automatique : AAMMJJ + numéro du jour sur 5 chiffres
+  // Exemple : 26 (année) 10 (mois) 26 (jour) + 00001 -> 26102600001
+  static Future<String> _prochainMatricule(
+    DatabaseExecutor executeur,
+    String table,
+  ) async {
+    final maintenant = DateTime.now();
+    final annee = (maintenant.year % 100).toString().padLeft(2, '0');
+    final mois = maintenant.month.toString().padLeft(2, '0');
+    final jour = maintenant.day.toString().padLeft(2, '0');
+    final prefixe = '$annee$mois$jour';
+
+    // Le plus grand matricule déjà attribué aujourd'hui (11 chiffres)
+    final lignes = await executeur.rawQuery(
+      'SELECT MAX(code) AS dernier FROM $table WHERE code GLOB ?',
+      ['${prefixe}[0-9][0-9][0-9][0-9][0-9]'],
+    );
+
+    final dernier = lignes.first['dernier'] as String?;
+    final numero = dernier == null ? 1 : int.parse(dernier.substring(6)) + 1;
+
+    if (numero > 99999) {
+      throw Exception('Limite de 99 999 matricules par jour atteinte');
+    }
+
+    return '$prefixe${numero.toString().padLeft(5, '0')}';
+  }
+
+  // Aperçu du prochain matricule (le vrai est attribué à l'enregistrement)
+  static Future<String> apercuProchainMatriculeArticle() =>
+      _prochainMatricule(db, 'articles');
 }

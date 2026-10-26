@@ -6,6 +6,7 @@ import 'package:gestionyobs/security/login_page.dart';
 import 'package:gestionyobs/modules/module_page.dart';
 import 'package:gestionyobs/permissions/roles_droits_page.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
+import 'package:gestionyobs/page/articles_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -60,6 +61,13 @@ class HomePage extends StatelessWidget {
         'Caisse et historique des ventes',
         Icons.point_of_sale,
         ['ventes.creer', 'ventes.voir'],
+      ),
+      _Module(
+        titre: 'Articles',
+        description: 'Catalogue commun et prix',
+        icone: Icons.category,
+        permissions: ['articles.voir', 'articles.gerer'],
+        ouvrir: (_) => const ArticlesPage(),
       ),
       _bientot('Stock', 'Articles, stock et réceptions', Icons.inventory_2, [
         'stock.voir',

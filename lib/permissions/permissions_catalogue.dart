@@ -53,6 +53,16 @@ const List<PermissionDef> cataloguePermissions = [
     'Administration',
     adminSeulement: true,
   ),
+  PermissionDef(
+    'articles.voir',
+    "Consulter le catalogue d'articles",
+    'Articles',
+  ),
+  PermissionDef(
+    'articles.gerer',
+    'Créer et modifier les articles et les prix de vente',
+    'Articles',
+  ),
 ];
 
 /// Les droits donnés au départ aux rôles de base (d'après le tableau validé).
