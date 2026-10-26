@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:gestionyobs/controller/app_scroll_behavior.dart';
 
 import 'startup_page.dart';
 
@@ -12,16 +13,21 @@ class MonApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'YOBSTIE',
+      title: 'Gestion Provenderie',
       debugShowCheckedModeBanner: false,
+      // Barres de défilement visibles dans toutes les pages
+      scrollBehavior: const AppScrollBehavior(),
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
         useMaterial3: true,
+        // Une barre plus épaisse, plus facile à saisir à la souris
+        scrollbarTheme: ScrollbarThemeData(
+          thickness: WidgetStateProperty.all(10),
+          radius: const Radius.circular(8),
+          thumbColor: WidgetStateProperty.all(Colors.green.shade700),
+        ),
       ),
       home: const StartupPage(),
-      // home: const LoginPage(),
-      //home: const ConfigTestPage(),
-      //home: const ConfigPage(),
     );
   }
 }

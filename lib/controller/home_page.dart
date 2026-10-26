@@ -7,6 +7,8 @@ import 'package:gestionyobs/modules/module_page.dart';
 import 'package:gestionyobs/permissions/roles_droits_page.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
 import 'package:gestionyobs/page/articles_page.dart';
+import 'package:gestionyobs/page/stock_page.dart';
+import 'package:gestionyobs/page/tiers_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -69,10 +71,27 @@ class HomePage extends StatelessWidget {
         permissions: ['articles.voir', 'articles.gerer'],
         ouvrir: (_) => const ArticlesPage(),
       ),
-      _bientot('Stock', 'Articles, stock et réceptions', Icons.inventory_2, [
-        'stock.voir',
-        'stock.modifier',
-      ]),
+      _Module(
+        titre: 'Stock',
+        description: "Stock de l'agence et mouvements",
+        icone: Icons.inventory_2,
+        permissions: ['stock.voir', 'stock.modifier', 'stock.ajuster'],
+        ouvrir: (_) => const StockPage(),
+      ),
+      _Module(
+        titre: 'Clients',
+        description: 'Fiches clients et plafond de crédit',
+        icone: Icons.groups,
+        permissions: ['clients.voir', 'clients.gerer'],
+        ouvrir: (_) => const TiersPage(type: 'client'),
+      ),
+      _Module(
+        titre: 'Fournisseurs',
+        description: 'Fiches fournisseurs',
+        icone: Icons.local_shipping,
+        permissions: ['fournisseurs.voir', 'fournisseurs.gerer'],
+        ouvrir: (_) => const TiersPage(type: 'fournisseur'),
+      ),
       _bientot('Achats', 'Achats et fournisseurs', Icons.shopping_cart, [
         'achats.voir',
       ]),

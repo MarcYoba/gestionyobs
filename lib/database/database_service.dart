@@ -8,6 +8,8 @@ import 'package:gestionyobs/security/utilisateur.dart';
 import 'package:gestionyobs/permissions/permissions_catalogue.dart';
 import 'package:gestionyobs/security/role.dart';
 import 'package:gestionyobs/modules/article.dart';
+import 'package:gestionyobs/modules/stock.dart';
+import 'package:gestionyobs/modules/tiers.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -21,7 +23,11 @@ class DatabaseService {
   // Version 4 : rôles, permissions et droits des rôles.
   //static const int _versionBase = 4;
   // Version 5 : table des articles.
-  static const int _versionBase = 5;
+  //static const int _versionBase = 5;
+  // Version 6 : stock par agence et mouvements de stock.
+  // static const int _versionBase = 6;
+  // Version 7 : clients et fournisseurs (table tiers).
+  static const int _versionBase = 7;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -50,6 +56,9 @@ class DatabaseService {
           await _creerTablesRoles(db);
           await _initialiserRoles(db);
           await _creerTableArticles(db);
+          await _creerTablesStock(db);
+          await _creerTableTiers(db);
+          await _creerTiersParDefaut(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -64,6 +73,13 @@ class DatabaseService {
           }
           if (ancienneVersion < 5) {
             await _creerTableArticles(db);
+          }
+          if (ancienneVersion < 6) {
+            await _creerTablesStock(db);
+          }
+          if (ancienneVersion < 7) {
+            await _creerTableTiers(db);
+            await _creerTiersParDefaut(db);
           }
         },
       ),
@@ -845,4 +861,405 @@ class DatabaseService {
   // Aperçu du prochain matricule (le vrai est attribué à l'enregistrement)
   static Future<String> apercuProchainMatriculeArticle() =>
       _prochainMatricule(db, 'articles');
+  // ---------- Stock ----------
+
+  static Future<void> _creerTablesStock(Database db) async {
+    // La quantité actuelle d'un article dans une agence
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS stock (
+        article_id INTEGER NOT NULL,
+        agence_id INTEGER NOT NULL,
+        quantite REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (article_id, agence_id),
+        FOREIGN KEY (article_id) REFERENCES articles(id),
+        FOREIGN KEY (agence_id) REFERENCES agences(id)
+      )
+    ''');
+
+    // L'historique : chaque changement de quantité, jamais modifié
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS mouvements_stock (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        article_id INTEGER NOT NULL,
+        agence_id INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        quantite REAL NOT NULL,
+        quantite_avant REAL NOT NULL,
+        quantite_apres REAL NOT NULL,
+        motif TEXT NOT NULL,
+        commentaire TEXT,
+        utilisateur_id INTEGER NOT NULL,
+        cree_le TEXT NOT NULL,
+        FOREIGN KEY (article_id) REFERENCES articles(id),
+        FOREIGN KEY (agence_id) REFERENCES agences(id),
+        FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_mouvements_agence
+      ON mouvements_stock (agence_id, id)
+    ''');
+  }
+
+  // Arrondi à 3 décimales (évite 0.1 + 0.2 = 0.30000000000000004)
+  static double _arrondir(double valeur) =>
+      double.parse(valeur.toStringAsFixed(3));
+
+  static void _exigerVueStock() {
+    if (!Session.peut('stock.voir') &&
+        !Session.peut('stock.modifier') &&
+        !Session.peut('stock.ajuster')) {
+      throw Exception('Action non autorisée');
+    }
+  }
+
+  // Le stock de l'agence courante : tous les articles actifs
+  static Future<List<LigneStock>> listerStock({
+    String recherche = '',
+    bool alertesSeulement = false,
+  }) async {
+    _exigerVueStock();
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final args = <Object>[agence.id];
+    var filtre = '';
+
+    final texte = recherche.trim();
+    if (texte.isNotEmpty) {
+      filtre =
+          'AND (a.code LIKE ? OR a.designation LIKE ? OR a.categorie LIKE ?)';
+      args.addAll(['%$texte%', '%$texte%', '%$texte%']);
+    }
+
+    final lignes = await db.rawQuery('''
+      SELECT a.id, a.code, a.designation, a.categorie, a.unite, a.seuil_alerte,
+             COALESCE(s.quantite, 0) AS quantite
+      FROM articles a
+      LEFT JOIN stock s ON s.article_id = a.id AND s.agence_id = ?
+      WHERE a.actif = 1 $filtre
+      ORDER BY a.designation COLLATE NOCASE
+    ''', args);
+
+    final liste = lignes.map(LigneStock.fromMap).toList();
+    return alertesSeulement
+        ? liste.where((l) => l.enRupture || l.enAlerte).toList()
+        : liste;
+  }
+
+  // Enregistre un mouvement et met le stock à jour. Retourne son matricule.
+  //  - 'entree'     : quantite = quantité reçue
+  //  - 'sortie'     : quantite = quantité sortie
+  //  - 'ajustement' : quantite = quantité réellement comptée
+  static Future<String> enregistrerMouvement({
+    required int articleId,
+    required String type,
+    required double quantite,
+    required String motif,
+    String? commentaire,
+  }) async {
+    Session.exiger(type == 'entree' ? 'stock.modifier' : 'stock.ajuster');
+
+    final agence = Session.agenceCourante;
+    final utilisateur = Session.utilisateurCourant;
+    if (agence == null || utilisateur == null) {
+      throw Exception('Aucune agence sélectionnée');
+    }
+
+    final q = _arrondir(quantite);
+
+    // Transaction : le stock et l'historique changent ensemble, ou pas du tout
+    return db.transaction((txn) async {
+      final article = await txn.query(
+        'articles',
+        columns: ['actif'],
+        where: 'id = ?',
+        whereArgs: [articleId],
+        limit: 1,
+      );
+      if (article.isEmpty) throw Exception('Article introuvable');
+      if (article.first['actif'] != 1) {
+        throw Exception('Cet article est désactivé');
+      }
+
+      final actuel = await txn.query(
+        'stock',
+        columns: ['quantite'],
+        where: 'article_id = ? AND agence_id = ?',
+        whereArgs: [articleId, agence.id],
+        limit: 1,
+      );
+      final avant = actuel.isEmpty
+          ? 0.0
+          : (actuel.first['quantite'] as num).toDouble();
+
+      double apres;
+      switch (type) {
+        case 'entree':
+          if (q <= 0)
+            throw Exception('La quantité doit être supérieure à zéro');
+          apres = _arrondir(avant + q);
+        case 'sortie':
+          if (q <= 0)
+            throw Exception('La quantité doit être supérieure à zéro');
+          if (q > avant) {
+            throw Exception(
+              'Stock insuffisant (disponible : ${formaterQuantite(avant)})',
+            );
+          }
+          apres = _arrondir(avant - q);
+        case 'ajustement':
+          if (q < 0) {
+            throw Exception('La quantité comptée ne peut pas être négative');
+          }
+          apres = q;
+        default:
+          throw Exception('Type de mouvement inconnu');
+      }
+
+      final ecart = _arrondir(apres - avant);
+      if (type == 'ajustement' && ecart == 0) {
+        throw Exception('La quantité comptée est identique au stock actuel');
+      }
+
+      // Met à jour la quantité (la crée si c'est la première fois)
+      await txn.execute(
+        '''
+        INSERT INTO stock (article_id, agence_id, quantite) VALUES (?, ?, ?)
+        ON CONFLICT(article_id, agence_id) DO UPDATE SET quantite = excluded.quantite
+      ''',
+        [articleId, agence.id, apres],
+      );
+
+      final code = await _prochainMatricule(txn, 'mouvements_stock');
+      await txn.insert('mouvements_stock', {
+        'code': code,
+        'article_id': articleId,
+        'agence_id': agence.id,
+        'type': type,
+        'quantite': ecart,
+        'quantite_avant': avant,
+        'quantite_apres': apres,
+        'motif': motif,
+        'commentaire': _videEnNull(commentaire),
+        'utilisateur_id': utilisateur.id,
+        'cree_le': DateTime.now().toIso8601String(),
+      });
+
+      return code;
+    });
+  }
+
+  // L'historique de l'agence courante (le plus récent d'abord)
+  static Future<List<Mouvement>> listerMouvements({
+    int? articleId,
+    int limite = 200,
+  }) async {
+    _exigerVueStock();
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final args = <Object>[agence.id];
+    var filtre = '';
+    if (articleId != null) {
+      filtre = 'AND m.article_id = ?';
+      args.add(articleId);
+    }
+    args.add(limite);
+
+    final lignes = await db.rawQuery('''
+      SELECT m.code, m.type, m.quantite, m.quantite_avant, m.quantite_apres,
+             m.motif, m.commentaire, m.cree_le,
+             a.designation, a.code AS article_code, a.unite,
+             u.nom_complet AS utilisateur
+      FROM mouvements_stock m
+      INNER JOIN articles a ON a.id = m.article_id
+      INNER JOIN utilisateurs u ON u.id = m.utilisateur_id
+      WHERE m.agence_id = ? $filtre
+      ORDER BY m.id DESC
+      LIMIT ?
+    ''', args);
+
+    return lignes.map(Mouvement.fromMap).toList();
+  }
+
+  // ---------- Clients et fournisseurs ----------
+
+  static Future<void> _creerTableTiers(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS tiers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        nom TEXT NOT NULL,
+        est_client INTEGER NOT NULL DEFAULT 0,
+        est_fournisseur INTEGER NOT NULL DEFAULT 0,
+        telephone TEXT,
+        email TEXT,
+        ville TEXT,
+        adresse TEXT,
+        plafond_credit INTEGER NOT NULL DEFAULT 0,
+        notes TEXT,
+        systeme INTEGER NOT NULL DEFAULT 0,
+        actif INTEGER NOT NULL DEFAULT 1,
+        cree_le TEXT NOT NULL
+      )
+    ''');
+  }
+
+  // Les comptes système : pour les ventes et achats sans tiers précis
+  static Future<void> _creerTiersParDefaut(Database db) async {
+    final existants = await db.rawQuery(
+      'SELECT COUNT(*) AS n FROM tiers WHERE systeme = 1',
+    );
+    if ((existants.first['n'] as int) > 0) return;
+
+    final defauts = <Map<String, Object>>[
+      {'nom': 'Client comptant', 'est_client': 1, 'est_fournisseur': 0},
+      {'nom': 'Fournisseur occasionnel', 'est_client': 0, 'est_fournisseur': 1},
+    ];
+
+    for (final t in defauts) {
+      final code = await _prochainMatricule(db, 'tiers');
+      await db.insert('tiers', {
+        ...t,
+        'code': code,
+        'systeme': 1,
+        'actif': 1,
+        'cree_le': DateTime.now().toIso8601String(),
+      });
+    }
+  }
+
+  // type : 'client' ou 'fournisseur'
+  static Future<List<Tiers>> listerTiers({
+    required String type,
+    String recherche = '',
+    bool inclureInactifs = false,
+  }) async {
+    if (!peutVoirTiers(type)) throw Exception('Action non autorisée');
+
+    final conditions = <String>[
+      type == 'client' ? 'est_client = 1' : 'est_fournisseur = 1',
+    ];
+    final args = <Object>[];
+
+    if (!inclureInactifs) conditions.add('actif = 1');
+
+    final texte = recherche.trim();
+    if (texte.isNotEmpty) {
+      conditions.add(
+        '(code LIKE ? OR nom LIKE ? OR telephone LIKE ? OR ville LIKE ?)',
+      );
+      args.addAll(List.filled(4, '%$texte%'));
+    }
+
+    final lignes = await db.query(
+      'tiers',
+      where: conditions.join(' AND '),
+      whereArgs: args.isEmpty ? null : args,
+      orderBy: 'nom COLLATE NOCASE',
+    );
+    return lignes.map(Tiers.fromMap).toList();
+  }
+
+  // Retourne le matricule attribué
+  static Future<String> creerTiers({
+    required String nom,
+    required bool estClient,
+    required bool estFournisseur,
+    String? telephone,
+    String? email,
+    String? ville,
+    String? adresse,
+    int plafondCredit = 0,
+    String? notes,
+  }) async {
+    if (!estClient && !estFournisseur) {
+      throw Exception('Choisissez au moins un type : client ou fournisseur');
+    }
+    if (estClient) Session.exiger('clients.gerer');
+    if (estFournisseur) Session.exiger('fournisseurs.gerer');
+
+    return db.transaction((txn) async {
+      final code = await _prochainMatricule(txn, 'tiers');
+
+      await txn.insert('tiers', {
+        'code': code,
+        'nom': nom,
+        'est_client': estClient ? 1 : 0,
+        'est_fournisseur': estFournisseur ? 1 : 0,
+        'telephone': _videEnNull(telephone),
+        'email': _videEnNull(email),
+        'ville': _videEnNull(ville),
+        'adresse': _videEnNull(adresse),
+        'plafond_credit': estClient ? plafondCredit : 0,
+        'notes': _videEnNull(notes),
+        'systeme': 0,
+        'actif': 1,
+        'cree_le': DateTime.now().toIso8601String(),
+      });
+
+      return code;
+    });
+  }
+
+  static Future<void> modifierTiers({
+    required int id,
+    required String nom,
+    required bool estClient,
+    required bool estFournisseur,
+    String? telephone,
+    String? email,
+    String? ville,
+    String? adresse,
+    int plafondCredit = 0,
+    String? notes,
+    required bool actif,
+  }) async {
+    if (!estClient && !estFournisseur) {
+      throw Exception('Choisissez au moins un type : client ou fournisseur');
+    }
+
+    final actuel = await db.query(
+      'tiers',
+      columns: ['systeme', 'est_client', 'est_fournisseur'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (actuel.isEmpty) throw Exception('Tiers introuvable');
+    if (actuel.first['systeme'] == 1) {
+      throw Exception('Un compte système ne peut pas être modifié');
+    }
+
+    // Il faut le droit de gérer chaque rôle concerné, ancien ou nouveau
+    if (estClient || actuel.first['est_client'] == 1) {
+      Session.exiger('clients.gerer');
+    }
+    if (estFournisseur || actuel.first['est_fournisseur'] == 1) {
+      Session.exiger('fournisseurs.gerer');
+    }
+
+    await db.update(
+      'tiers',
+      {
+        'nom': nom,
+        'est_client': estClient ? 1 : 0,
+        'est_fournisseur': estFournisseur ? 1 : 0,
+        'telephone': _videEnNull(telephone),
+        'email': _videEnNull(email),
+        'ville': _videEnNull(ville),
+        'adresse': _videEnNull(adresse),
+        'plafond_credit': estClient ? plafondCredit : 0,
+        'notes': _videEnNull(notes),
+        'actif': actif ? 1 : 0,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
 }

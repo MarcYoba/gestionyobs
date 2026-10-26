@@ -21,7 +21,12 @@ const List<PermissionDef> cataloguePermissions = [
   PermissionDef('stock.voir', 'Consulter le stock', 'Stock'),
   PermissionDef(
     'stock.modifier',
-    'Modifier le stock et enregistrer les réceptions',
+    'Enregistrer les entrées de marchandise (réceptions)',
+    'Stock',
+  ),
+  PermissionDef(
+    'stock.ajuster',
+    'Ajuster le stock (inventaire) et enregistrer des sorties',
     'Stock',
   ),
   PermissionDef(
@@ -62,6 +67,22 @@ const List<PermissionDef> cataloguePermissions = [
     'articles.gerer',
     'Créer et modifier les articles et les prix de vente',
     'Articles',
+  ),
+  PermissionDef('clients.voir', 'Consulter les clients', 'Clients'),
+  PermissionDef(
+    'clients.gerer',
+    'Créer et modifier les clients et leur plafond de crédit',
+    'Clients',
+  ),
+  PermissionDef(
+    'fournisseurs.voir',
+    'Consulter les fournisseurs',
+    'Fournisseurs',
+  ),
+  PermissionDef(
+    'fournisseurs.gerer',
+    'Créer et modifier les fournisseurs',
+    'Fournisseurs',
   ),
 ];
 

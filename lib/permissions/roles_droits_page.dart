@@ -18,11 +18,18 @@ class _RolesDroitsPageState extends State<RolesDroitsPage> {
   Set<String> _accordes = {};
   bool _chargement = true;
   String? _erreur;
+  final _defilementHorizontal = ScrollController();
 
   @override
   void initState() {
     super.initState();
     _charger();
+  }
+
+  @override
+  void dispose() {
+    _defilementHorizontal.dispose();
+    super.dispose();
   }
 
   String _cle(String role, String permission) => '$role|$permission';
@@ -282,6 +289,7 @@ class _RolesDroitsPageState extends State<RolesDroitsPage> {
     }
 
     return SingleChildScrollView(
+      controller: _defilementHorizontal,
       scrollDirection: Axis.horizontal,
       child: SizedBox(
         width: 320.0 + 110.0 * roles.length,
