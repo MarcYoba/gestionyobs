@@ -10,6 +10,7 @@ import 'package:gestionyobs/security/role.dart';
 import 'package:gestionyobs/modules/article.dart';
 import 'package:gestionyobs/modules/stock.dart';
 import 'package:gestionyobs/modules/tiers.dart';
+import 'package:gestionyobs/modules/mode_paiement.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -27,7 +28,9 @@ class DatabaseService {
   // Version 6 : stock par agence et mouvements de stock.
   // static const int _versionBase = 6;
   // Version 7 : clients et fournisseurs (table tiers).
-  static const int _versionBase = 7;
+  // static const int _versionBase = 7;
+  // Version 8 : modes de paiement.
+  static const int _versionBase = 8;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -59,6 +62,8 @@ class DatabaseService {
           await _creerTablesStock(db);
           await _creerTableTiers(db);
           await _creerTiersParDefaut(db);
+          await _creerTableModesPaiement(db);
+          await _creerModesParDefaut(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -80,6 +85,10 @@ class DatabaseService {
           if (ancienneVersion < 7) {
             await _creerTableTiers(db);
             await _creerTiersParDefaut(db);
+          }
+          if (ancienneVersion < 8) {
+            await _creerTableModesPaiement(db);
+            await _creerModesParDefaut(db);
           }
         },
       ),
@@ -1261,5 +1270,214 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  // ---------- Modes de paiement ----------
+
+  static Future<void> _creerTableModesPaiement(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS modes_paiement (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        libelle TEXT NOT NULL UNIQUE,
+        type TEXT NOT NULL,
+        reference_obligatoire INTEGER NOT NULL DEFAULT 0,
+        systeme INTEGER NOT NULL DEFAULT 0,
+        actif INTEGER NOT NULL DEFAULT 1,
+        ordre INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+  }
+
+  static Future<void> _creerModesParDefaut(Database db) async {
+    final defauts = <Map<String, Object>>[
+      {
+        'code': 'especes',
+        'libelle': 'Espèces',
+        'type': 'caisse',
+        'reference_obligatoire': 0,
+        'systeme': 1,
+      },
+      {
+        'code': 'orange_money',
+        'libelle': 'Orange Money',
+        'type': 'mobile',
+        'reference_obligatoire': 1,
+        'systeme': 0,
+      },
+      {
+        'code': 'mobile_money',
+        'libelle': 'Mobile Money',
+        'type': 'mobile',
+        'reference_obligatoire': 1,
+        'systeme': 0,
+      },
+      {
+        'code': 'banque',
+        'libelle': 'Banque',
+        'type': 'banque',
+        'reference_obligatoire': 1,
+        'systeme': 0,
+      },
+    ];
+
+    for (var i = 0; i < defauts.length; i++) {
+      await db.insert('modes_paiement', {
+        ...defauts[i],
+        'actif': 1,
+        'ordre': i + 1,
+      }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    }
+  }
+
+  // Aucun droit exigé : tous les utilisateurs en ont besoin pour encaisser
+  static Future<List<ModePaiement>> listerModesPaiement({
+    bool inclureInactifs = false,
+  }) async {
+    final lignes = await db.query(
+      'modes_paiement',
+      where: inclureInactifs ? null : 'actif = 1',
+      orderBy: 'ordre, id',
+    );
+    return lignes.map(ModePaiement.fromMap).toList();
+  }
+
+  // Vérifie qu'aucun autre mode ne porte déjà ce nom
+  static Future<void> _verifierModeLibelleLibre(
+    String libelle, {
+    int? sauf,
+  }) async {
+    final lignes = await db.query(
+      'modes_paiement',
+      columns: ['id'],
+      where: sauf == null
+          ? 'LOWER(libelle) = LOWER(?)'
+          : 'LOWER(libelle) = LOWER(?) AND id != ?',
+      whereArgs: sauf == null ? [libelle] : [libelle, sauf],
+    );
+    if (lignes.isNotEmpty) {
+      throw Exception('Un mode de paiement porte déjà ce nom');
+    }
+  }
+
+  // Ajoute un numéro (_2, _3...) si le code existe déjà
+  static Future<String> _codeLibre(String table, String base) async {
+    var code = base;
+    var numero = 2;
+    while ((await db.query(
+      table,
+      columns: ['code'],
+      where: 'code = ?',
+      whereArgs: [code],
+    )).isNotEmpty) {
+      code = '${base}_$numero';
+      numero++;
+    }
+    return code;
+  }
+
+  static Future<void> creerModePaiement({
+    required String libelle,
+    required String type,
+    required bool referenceObligatoire,
+  }) async {
+    Session.exiger('paiements.gerer');
+
+    final propre = libelle.trim();
+    if (propre.isEmpty) throw Exception('Le nom est vide');
+    if (!typesTresorerie.containsKey(type)) throw Exception('Type inconnu');
+    await _verifierModeLibelleLibre(propre);
+
+    final code = await _codeLibre('modes_paiement', _versCode(propre));
+    final r = await db.rawQuery(
+      'SELECT COALESCE(MAX(ordre), 0) + 1 AS suivant FROM modes_paiement',
+    );
+
+    await db.insert('modes_paiement', {
+      'code': code,
+      'libelle': propre,
+      'type': type,
+      'reference_obligatoire': referenceObligatoire ? 1 : 0,
+      'systeme': 0,
+      'actif': 1,
+      'ordre': r.first['suivant'],
+    });
+  }
+
+  static Future<void> modifierModePaiement({
+    required int id,
+    required String libelle,
+    required String type,
+    required bool referenceObligatoire,
+    required bool actif,
+  }) async {
+    Session.exiger('paiements.gerer');
+
+    final propre = libelle.trim();
+    if (propre.isEmpty) throw Exception('Le nom est vide');
+    if (!typesTresorerie.containsKey(type)) throw Exception('Type inconnu');
+
+    final lignes = await db.query(
+      'modes_paiement',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (lignes.isEmpty) throw Exception('Mode de paiement introuvable');
+
+    if (lignes.first['systeme'] == 1) {
+      if (type != lignes.first['type']) {
+        throw Exception('Le type du mode système ne peut pas changer');
+      }
+      if (!actif) {
+        throw Exception('Le mode système ne peut pas être désactivé');
+      }
+    }
+
+    await _verifierModeLibelleLibre(propre, sauf: id);
+
+    await db.update(
+      'modes_paiement',
+      {
+        'libelle': propre,
+        'type': type,
+        'reference_obligatoire': referenceObligatoire ? 1 : 0,
+        'actif': actif ? 1 : 0,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  // sens : -1 pour monter, +1 pour descendre
+  static Future<void> deplacerModePaiement(int id, int sens) async {
+    Session.exiger('paiements.gerer');
+
+    final modes = await db.query(
+      'modes_paiement',
+      columns: ['id'],
+      orderBy: 'ordre, id',
+    );
+    final ids = modes.map((m) => m['id'] as int).toList();
+
+    final i = ids.indexOf(id);
+    final j = i + sens;
+    if (i < 0 || j < 0 || j >= ids.length) return;
+
+    final temporaire = ids[i];
+    ids[i] = ids[j];
+    ids[j] = temporaire;
+
+    // On renumérote tout : 1, 2, 3...
+    await db.transaction((txn) async {
+      for (var k = 0; k < ids.length; k++) {
+        await txn.update(
+          'modes_paiement',
+          {'ordre': k + 1},
+          where: 'id = ?',
+          whereArgs: [ids[k]],
+        );
+      }
+    });
   }
 }

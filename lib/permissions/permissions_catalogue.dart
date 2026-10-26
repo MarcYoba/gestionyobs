@@ -84,6 +84,12 @@ const List<PermissionDef> cataloguePermissions = [
     'Créer et modifier les fournisseurs',
     'Fournisseurs',
   ),
+  PermissionDef(
+    'paiements.gerer',
+    'Gérer les modes de paiement',
+    'Administration',
+    adminSeulement: true,
+  ),
 ];
 
 /// Les droits donnés au départ aux rôles de base (d'après le tableau validé).

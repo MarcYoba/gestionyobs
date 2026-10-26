@@ -9,6 +9,7 @@ import 'package:gestionyobs/security/utilisateur.dart';
 import 'package:gestionyobs/page/articles_page.dart';
 import 'package:gestionyobs/page/stock_page.dart';
 import 'package:gestionyobs/page/tiers_page.dart';
+import 'package:gestionyobs/page/modes_paiement_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -111,6 +112,13 @@ class HomePage extends StatelessWidget {
         icone: Icons.admin_panel_settings,
         permissions: ['droits.gerer'],
         ouvrir: (_) => const RolesDroitsPage(),
+      ),
+      _Module(
+        titre: 'Modes de paiement',
+        description: 'Espèces, mobile money, banque...',
+        icone: Icons.payments,
+        permissions: ['paiements.gerer'],
+        ouvrir: (_) => const ModesPaiementPage(),
       ),
     ];
 
