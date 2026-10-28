@@ -10,6 +10,7 @@ import 'package:gestionyobs/page/articles_page.dart';
 import 'package:gestionyobs/page/stock_page.dart';
 import 'package:gestionyobs/page/tiers_page.dart';
 import 'package:gestionyobs/page/modes_paiement_page.dart';
+import 'package:gestionyobs/page/plan_comptable_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -119,6 +120,13 @@ class HomePage extends StatelessWidget {
         icone: Icons.payments,
         permissions: ['paiements.gerer'],
         ouvrir: (_) => const ModesPaiementPage(),
+      ),
+      _Module(
+        titre: 'Plan comptable',
+        description: 'Comptes et import du plan',
+        icone: Icons.menu_book,
+        permissions: ['comptabilite.voir', 'comptabilite.gerer'],
+        ouvrir: (_) => const PlanComptablePage(),
       ),
     ];
 

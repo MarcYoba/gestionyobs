@@ -90,6 +90,16 @@ const List<PermissionDef> cataloguePermissions = [
     'Administration',
     adminSeulement: true,
   ),
+  PermissionDef(
+    'comptabilite.voir',
+    'Consulter le plan comptable',
+    'Comptabilité',
+  ),
+  PermissionDef(
+    'comptabilite.gerer',
+    'Gérer le plan comptable et importer un plan',
+    'Comptabilité',
+  ),
 ];
 
 /// Les droits donnés au départ aux rôles de base (d'après le tableau validé).

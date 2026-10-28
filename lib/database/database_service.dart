@@ -11,6 +11,7 @@ import 'package:gestionyobs/modules/article.dart';
 import 'package:gestionyobs/modules/stock.dart';
 import 'package:gestionyobs/modules/tiers.dart';
 import 'package:gestionyobs/modules/mode_paiement.dart';
+import 'package:gestionyobs/modules/compte_comptable.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -30,7 +31,9 @@ class DatabaseService {
   // Version 7 : clients et fournisseurs (table tiers).
   // static const int _versionBase = 7;
   // Version 8 : modes de paiement.
-  static const int _versionBase = 8;
+  //static const int _versionBase = 8;
+  // Version 9 : plan comptable.
+  static const int _versionBase = 9;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -64,6 +67,7 @@ class DatabaseService {
           await _creerTiersParDefaut(db);
           await _creerTableModesPaiement(db);
           await _creerModesParDefaut(db);
+          await _creerTableComptes(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -89,6 +93,9 @@ class DatabaseService {
           if (ancienneVersion < 8) {
             await _creerTableModesPaiement(db);
             await _creerModesParDefaut(db);
+          }
+          if (ancienneVersion < 9) {
+            await _creerTableComptes(db);
           }
         },
       ),
@@ -1479,5 +1486,189 @@ class DatabaseService {
         );
       }
     });
+  }
+
+  // ---------- Plan comptable ----------
+
+  static Future<void> _creerTableComptes(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS comptes_comptables (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        numero TEXT NOT NULL UNIQUE,
+        intitule TEXT NOT NULL,
+        classe INTEGER NOT NULL,
+        actif INTEGER NOT NULL DEFAULT 1,
+        cree_le TEXT NOT NULL
+      )
+    ''');
+  }
+
+  static void _exigerVueCompta() {
+    if (!Session.peut('comptabilite.voir') &&
+        !Session.peut('comptabilite.gerer')) {
+      throw Exception('Action non autorisée');
+    }
+  }
+
+  // Tous les comptes, dans l'ordre des numéros
+  static Future<List<CompteComptable>> listerComptes() async {
+    _exigerVueCompta();
+
+    final lignes = await db.query('comptes_comptables', orderBy: 'numero');
+    final numeros = lignes.map((m) => m['numero'] as String).toList();
+
+    final comptes = <CompteComptable>[];
+    for (var i = 0; i < lignes.length; i++) {
+      final m = lignes[i];
+      // Dans l'ordre des numéros, les sous-comptes suivent leur compte :
+      // si le suivant commence par ce numéro, c'est un compte de regroupement
+      final regroupement =
+          i + 1 < numeros.length && numeros[i + 1].startsWith(numeros[i]);
+
+      comptes.add(
+        CompteComptable(
+          id: m['id'] as int,
+          numero: numeros[i],
+          intitule: m['intitule'] as String,
+          classe: m['classe'] as int,
+          actif: (m['actif'] as int) == 1,
+          imputable: !regroupement,
+        ),
+      );
+    }
+    return comptes;
+  }
+
+  // numéro -> intitulé, pour comparer avec un fichier à importer
+  static Future<Map<String, String>> comptesExistants() async {
+    Session.exiger('comptabilite.gerer');
+    final lignes = await db.query(
+      'comptes_comptables',
+      columns: ['numero', 'intitule'],
+    );
+    return {
+      for (final m in lignes) m['numero'] as String: m['intitule'] as String,
+    };
+  }
+
+  static Future<void> creerCompte({
+    required String numero,
+    required String intitule,
+  }) async {
+    Session.exiger('comptabilite.gerer');
+
+    final n = numero.trim();
+    final texte = intitule.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+    if (!RegExp(r'^[1-9]\d{1,9}$').hasMatch(n)) {
+      throw Exception(
+        'Numéro invalide : de 2 à 10 chiffres, sans zéro au début',
+      );
+    }
+    if (texte.isEmpty) throw Exception("L'intitulé est vide");
+
+    final existe = await db.query(
+      'comptes_comptables',
+      columns: ['id'],
+      where: 'numero = ?',
+      whereArgs: [n],
+      limit: 1,
+    );
+    if (existe.isNotEmpty) throw Exception('Ce numéro de compte existe déjà');
+
+    await db.insert('comptes_comptables', {
+      'numero': n,
+      'intitule': texte,
+      'classe': int.parse(n[0]),
+      'actif': 1,
+      'cree_le': DateTime.now().toIso8601String(),
+    });
+  }
+
+  // Le numéro ne change jamais : des associations pourront s'appuyer dessus
+  static Future<void> modifierCompte({
+    required int id,
+    required String intitule,
+    required bool actif,
+  }) async {
+    Session.exiger('comptabilite.gerer');
+
+    final texte = intitule.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (texte.isEmpty) throw Exception("L'intitulé est vide");
+
+    await db.update(
+      'comptes_comptables',
+      {'intitule': texte, 'actif': actif ? 1 : 0},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  // Ajoute les nouveaux comptes, met à jour les intitulés différents.
+  // Ne supprime jamais rien. Tout ou rien (transaction).
+  static Future<ResultatImport> importerComptes(
+    List<CompteAImporter> comptes,
+  ) async {
+    Session.exiger('comptabilite.gerer');
+
+    var ajoutes = 0;
+    var misAJour = 0;
+    var inchanges = 0;
+
+    await db.transaction((txn) async {
+      final lignes = await txn.query(
+        'comptes_comptables',
+        columns: ['numero', 'intitule'],
+      );
+      final existants = {
+        for (final m in lignes) m['numero'] as String: m['intitule'] as String,
+      };
+
+      final maintenant = DateTime.now().toIso8601String();
+      final vus = <String>{};
+      final lot = txn.batch();
+
+      for (final c in comptes) {
+        if (!RegExp(r'^[1-9]\d{1,9}$').hasMatch(c.numero)) {
+          throw Exception('Numéro invalide : ${c.numero}');
+        }
+        if (c.intitule.trim().isEmpty) {
+          throw Exception('Intitulé vide pour le compte ${c.numero}');
+        }
+        if (!vus.add(c.numero)) {
+          throw Exception('Numéro en double : ${c.numero}');
+        }
+
+        final actuel = existants[c.numero];
+        if (actuel == null) {
+          lot.insert('comptes_comptables', {
+            'numero': c.numero,
+            'intitule': c.intitule,
+            'classe': int.parse(c.numero[0]),
+            'actif': 1,
+            'cree_le': maintenant,
+          });
+          ajoutes++;
+        } else if (actuel != c.intitule) {
+          lot.update(
+            'comptes_comptables',
+            {'intitule': c.intitule},
+            where: 'numero = ?',
+            whereArgs: [c.numero],
+          );
+          misAJour++;
+        } else {
+          inchanges++;
+        }
+      }
+
+      await lot.commit(noResult: true);
+    });
+
+    return ResultatImport(
+      ajoutes: ajoutes,
+      misAJour: misAJour,
+      inchanges: inchanges,
+    );
   }
 }
