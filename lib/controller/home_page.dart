@@ -13,6 +13,7 @@ import 'package:gestionyobs/page/modes_paiement_page.dart';
 import 'package:gestionyobs/page/plan_comptable_page.dart';
 import 'package:gestionyobs/page/associations_page.dart';
 import 'package:gestionyobs/page/classes_articles_page.dart';
+import 'package:gestionyobs/page/achats_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -96,9 +97,25 @@ class HomePage extends StatelessWidget {
         permissions: ['fournisseurs.voir', 'fournisseurs.gerer'],
         ouvrir: (_) => const TiersPage(type: 'fournisseur'),
       ),
-      _bientot('Achats', 'Achats et fournisseurs', Icons.shopping_cart, [
-        'achats.voir',
-      ]),
+      _Module(
+        titre: "Classes d'articles",
+        description: 'Familles de produits et comptes',
+        icone: Icons.category,
+        permissions: [
+          'articles.voir',
+          'articles.gerer',
+          'comptabilite.voir',
+          'comptabilite.gerer',
+        ],
+        ouvrir: (_) => const ClassesArticlesPage(),
+      ),
+      _Module(
+        titre: 'Achats',
+        description: 'Achats, paiements et dettes',
+        icone: Icons.shopping_cart,
+        permissions: ['achats.voir', 'achats.creer'],
+        ouvrir: (_) => const AchatsPage(),
+      ),
       _bientot('Rapports', 'Rapports et finances', Icons.bar_chart, [
         'rapports.voir',
       ]),
@@ -136,18 +153,6 @@ class HomePage extends StatelessWidget {
         icone: Icons.account_tree,
         permissions: ['comptabilite.voir', 'comptabilite.gerer'],
         ouvrir: (_) => const AssociationsPage(),
-      ),
-      _Module(
-        titre: "Classes d'articles",
-        description: 'Familles de produits et comptes',
-        icone: Icons.category,
-        permissions: [
-          'articles.voir',
-          'articles.gerer',
-          'comptabilite.voir',
-          'comptabilite.gerer',
-        ],
-        ouvrir: (_) => const ClassesArticlesPage(),
       ),
     ];
 

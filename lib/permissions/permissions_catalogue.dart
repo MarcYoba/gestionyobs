@@ -100,6 +100,11 @@ const List<PermissionDef> cataloguePermissions = [
     'Gérer le plan comptable et importer un plan',
     'Comptabilité',
   ),
+  PermissionDef(
+    'achats.creer',
+    'Enregistrer un achat et réceptionner la marchandise',
+    'Achats',
+  ),
 ];
 
 /// Les droits donnés au départ aux rôles de base (d'après le tableau validé).

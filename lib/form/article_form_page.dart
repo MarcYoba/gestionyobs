@@ -213,14 +213,14 @@ class _ArticleFormPageState extends State<ArticleFormPage> {
                       ),
                       const SizedBox(height: 16),
 
-                      TextFormField(
-                        // controller: _categorieController,
-                        decoration: const InputDecoration(
-                          labelText: 'Catégorie (facultatif)',
-                          prefixIcon: Icon(Icons.category),
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
+                      // TextFormField(
+                      //   // controller: _categorieController,
+                      //   decoration: const InputDecoration(
+                      //     labelText: 'Catégorie (facultatif)',
+                      //     prefixIcon: Icon(Icons.category),
+                      //     border: OutlineInputBorder(),
+                      //   ),
+                      // ),
                       // if (_categories.isNotEmpty) ...[
                       //   const SizedBox(height: 8),
                       //   Wrap(

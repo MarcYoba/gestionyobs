@@ -16,6 +16,7 @@ import 'package:gestionyobs/modules/compte_comptable.dart';
 import 'package:gestionyobs/association/association.dart';
 import 'package:gestionyobs/modules/postes_comptables.dart';
 import 'package:gestionyobs/modules/classe_article.dart';
+import 'package:gestionyobs/modules/achat.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -41,7 +42,9 @@ class DatabaseService {
   // Version 10 : associations comptables et leur historique.
   //static const int _versionBase = 10;
   // Version 11 : classes d'articles (remplacent les catégories en texte libre).
-  static const int _versionBase = 11;
+  //static const int _versionBase = 11;
+  // Version 12 : achats, lignes d'achat et paiements.
+  static const int _versionBase = 12;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -78,6 +81,7 @@ class DatabaseService {
           await _creerTableComptes(db);
           await _creerTablesAssociations(db);
           await _migrerClasses(db);
+          await _creerTablesAchats(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -112,6 +116,9 @@ class DatabaseService {
           }
           if (ancienneVersion < 11) {
             await _migrerClasses(db);
+          }
+          if (ancienneVersion < 12) {
+            await _creerTablesAchats(db);
           }
         },
       ),
@@ -991,6 +998,101 @@ class DatabaseService {
   //  - 'entree'     : quantite = quantité reçue
   //  - 'sortie'     : quantite = quantité sortie
   //  - 'ajustement' : quantite = quantité réellement comptée
+  // Applique un mouvement de stock dans une transaction. Aucun contrôle de
+  // droit ici : l'appelant l'a déjà fait. Retourne le matricule du mouvement.
+  static Future<String> _mouvementStock(
+    Transaction txn, {
+    required int articleId,
+    required int agenceId,
+    required int utilisateurId,
+    required String type, // 'entree', 'sortie' ou 'ajustement'
+    required double quantite,
+    required String motif,
+    String? commentaire,
+    String? sourceType, // par exemple 'achat'
+    int? sourceId,
+  }) async {
+    final q = _arrondir(quantite);
+
+    final article = await txn.query(
+      'articles',
+      columns: ['actif'],
+      where: 'id = ?',
+      whereArgs: [articleId],
+      limit: 1,
+    );
+    if (article.isEmpty) throw Exception('Article introuvable');
+    if (article.first['actif'] != 1) {
+      throw Exception('Cet article est désactivé');
+    }
+
+    final actuel = await txn.query(
+      'stock',
+      columns: ['quantite'],
+      where: 'article_id = ? AND agence_id = ?',
+      whereArgs: [articleId, agenceId],
+      limit: 1,
+    );
+    final avant = actuel.isEmpty
+        ? 0.0
+        : (actuel.first['quantite'] as num).toDouble();
+
+    double apres;
+    switch (type) {
+      case 'entree':
+        if (q <= 0) throw Exception('La quantité doit être supérieure à zéro');
+        apres = _arrondir(avant + q);
+      case 'sortie':
+        if (q <= 0) throw Exception('La quantité doit être supérieure à zéro');
+        if (q > avant) {
+          throw Exception(
+            'Stock insuffisant (disponible : ${formaterQuantite(avant)})',
+          );
+        }
+        apres = _arrondir(avant - q);
+      case 'ajustement':
+        if (q < 0) {
+          throw Exception('La quantité comptée ne peut pas être négative');
+        }
+        apres = q;
+      default:
+        throw Exception('Type de mouvement inconnu');
+    }
+
+    final ecart = _arrondir(apres - avant);
+    if (type == 'ajustement' && ecart == 0) {
+      throw Exception('La quantité comptée est identique au stock actuel');
+    }
+
+    await txn.execute(
+      '''
+      INSERT INTO stock (article_id, agence_id, quantite) VALUES (?, ?, ?)
+      ON CONFLICT(article_id, agence_id) DO UPDATE SET quantite = excluded.quantite
+    ''',
+      [articleId, agenceId, apres],
+    );
+
+    final code = await _prochainMatricule(txn, 'mouvements_stock');
+    await txn.insert('mouvements_stock', {
+      'code': code,
+      'article_id': articleId,
+      'agence_id': agenceId,
+      'type': type,
+      'quantite': ecart,
+      'quantite_avant': avant,
+      'quantite_apres': apres,
+      'motif': motif,
+      'commentaire': _videEnNull(commentaire),
+      'utilisateur_id': utilisateurId,
+      'cree_le': DateTime.now().toIso8601String(),
+      'source_type': sourceType,
+      'source_id': sourceId,
+    });
+
+    return code;
+  }
+
+  // Un mouvement saisi à la main depuis la page Stock
   static Future<String> enregistrerMouvement({
     required int articleId,
     required String type,
@@ -1006,88 +1108,18 @@ class DatabaseService {
       throw Exception('Aucune agence sélectionnée');
     }
 
-    final q = _arrondir(quantite);
-
-    // Transaction : le stock et l'historique changent ensemble, ou pas du tout
-    return db.transaction((txn) async {
-      final article = await txn.query(
-        'articles',
-        columns: ['actif'],
-        where: 'id = ?',
-        whereArgs: [articleId],
-        limit: 1,
-      );
-      if (article.isEmpty) throw Exception('Article introuvable');
-      if (article.first['actif'] != 1) {
-        throw Exception('Cet article est désactivé');
-      }
-
-      final actuel = await txn.query(
-        'stock',
-        columns: ['quantite'],
-        where: 'article_id = ? AND agence_id = ?',
-        whereArgs: [articleId, agence.id],
-        limit: 1,
-      );
-      final avant = actuel.isEmpty
-          ? 0.0
-          : (actuel.first['quantite'] as num).toDouble();
-
-      double apres;
-      switch (type) {
-        case 'entree':
-          if (q <= 0)
-            throw Exception('La quantité doit être supérieure à zéro');
-          apres = _arrondir(avant + q);
-        case 'sortie':
-          if (q <= 0)
-            throw Exception('La quantité doit être supérieure à zéro');
-          if (q > avant) {
-            throw Exception(
-              'Stock insuffisant (disponible : ${formaterQuantite(avant)})',
-            );
-          }
-          apres = _arrondir(avant - q);
-        case 'ajustement':
-          if (q < 0) {
-            throw Exception('La quantité comptée ne peut pas être négative');
-          }
-          apres = q;
-        default:
-          throw Exception('Type de mouvement inconnu');
-      }
-
-      final ecart = _arrondir(apres - avant);
-      if (type == 'ajustement' && ecart == 0) {
-        throw Exception('La quantité comptée est identique au stock actuel');
-      }
-
-      // Met à jour la quantité (la crée si c'est la première fois)
-      await txn.execute(
-        '''
-        INSERT INTO stock (article_id, agence_id, quantite) VALUES (?, ?, ?)
-        ON CONFLICT(article_id, agence_id) DO UPDATE SET quantite = excluded.quantite
-      ''',
-        [articleId, agence.id, apres],
-      );
-
-      final code = await _prochainMatricule(txn, 'mouvements_stock');
-      await txn.insert('mouvements_stock', {
-        'code': code,
-        'article_id': articleId,
-        'agence_id': agence.id,
-        'type': type,
-        'quantite': ecart,
-        'quantite_avant': avant,
-        'quantite_apres': apres,
-        'motif': motif,
-        'commentaire': _videEnNull(commentaire),
-        'utilisateur_id': utilisateur.id,
-        'cree_le': DateTime.now().toIso8601String(),
-      });
-
-      return code;
-    });
+    return db.transaction(
+      (txn) => _mouvementStock(
+        txn,
+        articleId: articleId,
+        agenceId: agence.id,
+        utilisateurId: utilisateur.id,
+        type: type,
+        quantite: quantite,
+        motif: motif,
+        commentaire: commentaire,
+      ),
+    );
   }
 
   // L'historique de l'agence courante (le plus récent d'abord)
@@ -2149,6 +2181,404 @@ class DatabaseService {
       numero: m['numero'] as String,
       intitule: m['intitule'] as String,
       origine: m['portee'] as String,
+    );
+  }
+
+  // ---------- Achats ----------
+
+  static Future<void> _creerTablesAchats(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS achats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        agence_id INTEGER NOT NULL,
+        fournisseur_id INTEGER NOT NULL,
+        date_achat TEXT NOT NULL,
+        reference_fournisseur TEXT,
+        note TEXT,
+        total_ht INTEGER NOT NULL,
+        total_tva INTEGER NOT NULL DEFAULT 0,
+        total_ttc INTEGER NOT NULL,
+        statut TEXT NOT NULL DEFAULT 'valide',
+        utilisateur_id INTEGER NOT NULL,
+        cree_le TEXT NOT NULL,
+        FOREIGN KEY (agence_id) REFERENCES agences(id),
+        FOREIGN KEY (fournisseur_id) REFERENCES tiers(id),
+        FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_achats_agence ON achats (agence_id, date_achat)',
+    );
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS achat_lignes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        achat_id INTEGER NOT NULL,
+        article_id INTEGER NOT NULL,
+        code_article TEXT NOT NULL,
+        designation TEXT NOT NULL,
+        quantite REAL NOT NULL,
+        prix_unitaire INTEGER NOT NULL,
+        taux_tva REAL NOT NULL DEFAULT 0,
+        total_ht INTEGER NOT NULL,
+        montant_tva INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (achat_id) REFERENCES achats(id) ON DELETE CASCADE,
+        FOREIGN KEY (article_id) REFERENCES articles(id)
+      )
+    ''');
+
+    // Les paiements serviront aussi aux ventes et aux règlements
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS paiements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type_document TEXT NOT NULL,
+        document_id INTEGER NOT NULL,
+        mode_id INTEGER NOT NULL,
+        montant INTEGER NOT NULL,
+        reference TEXT,
+        date_paiement TEXT NOT NULL,
+        utilisateur_id INTEGER NOT NULL,
+        cree_le TEXT NOT NULL,
+        FOREIGN KEY (mode_id) REFERENCES modes_paiement(id),
+        FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_paiements_document '
+      'ON paiements (type_document, document_id)',
+    );
+
+    // Un mouvement de stock sait de quel document il vient
+    if (!await _colonneExiste(db, 'mouvements_stock', 'source_type')) {
+      await db.execute(
+        'ALTER TABLE mouvements_stock ADD COLUMN source_type TEXT',
+      );
+    }
+    if (!await _colonneExiste(db, 'mouvements_stock', 'source_id')) {
+      await db.execute(
+        'ALTER TABLE mouvements_stock ADD COLUMN source_id INTEGER',
+      );
+    }
+  }
+
+  // Les fournisseurs proposés dans le formulaire d'achat
+  // (le fournisseur occasionnel en premier)
+  static Future<List<Tiers>> fournisseursPourAchat() async {
+    Session.exiger('achats.creer');
+    final lignes = await db.query(
+      'tiers',
+      where: 'est_fournisseur = 1 AND actif = 1',
+      orderBy: 'systeme DESC, nom COLLATE NOCASE',
+    );
+    return lignes.map(Tiers.fromMap).toList();
+  }
+
+  // Les articles proposés dans le formulaire d'achat, avec leur dernier prix
+  static Future<List<Article>> rechercherArticlesAchat(String recherche) async {
+    Session.exiger('achats.creer');
+
+    final args = <Object>[];
+    var filtre = '';
+    final texte = recherche.trim();
+    if (texte.isNotEmpty) {
+      filtre = 'AND (a.code LIKE ? OR a.designation LIKE ? OR cl.nom LIKE ?)';
+      args.addAll(['%$texte%', '%$texte%', '%$texte%']);
+    }
+
+    final lignes = await db.rawQuery('''
+      SELECT a.id, a.code, a.designation, a.classe_id, cl.nom AS categorie,
+             a.unite, a.prix_achat, a.prix_vente, a.seuil_alerte, a.actif
+      FROM articles a
+      LEFT JOIN classes_articles cl ON cl.id = a.classe_id
+      WHERE a.actif = 1 $filtre
+      ORDER BY a.designation COLLATE NOCASE
+      LIMIT 50
+    ''', args);
+
+    return lignes.map((m) => Article.fromMap(m, avecPrixAchat: true)).toList();
+  }
+
+  // Enregistre un achat entier. Retourne son matricule.
+  static Future<String> creerAchat({
+    required int fournisseurId,
+    required DateTime date,
+    String? referenceFournisseur,
+    String? note,
+    required List<LigneAchatSaisie> lignes,
+    required List<PaiementSaisi> paiements,
+    bool majPrixCatalogue = false,
+  }) async {
+    Session.exiger('achats.creer');
+
+    final agence = Session.agenceCourante;
+    final utilisateur = Session.utilisateurCourant;
+    if (agence == null || utilisateur == null) {
+      throw Exception('Aucune agence sélectionnée');
+    }
+    if (lignes.isEmpty) {
+      throw Exception("L'achat doit contenir au moins un article");
+    }
+
+    final maintenant = DateTime.now();
+    final jour = DateTime(date.year, date.month, date.day);
+    if (jour.isAfter(
+      DateTime(maintenant.year, maintenant.month, maintenant.day),
+    )) {
+      throw Exception('La date ne peut pas être dans le futur');
+    }
+    String deux(int n) => n.toString().padLeft(2, '0');
+    final dateTexte = '${jour.year}-${deux(jour.month)}-${deux(jour.day)}';
+
+    return db.transaction((txn) async {
+      // Le fournisseur
+      final f = await txn.query(
+        'tiers',
+        columns: ['systeme', 'est_fournisseur', 'actif'],
+        where: 'id = ?',
+        whereArgs: [fournisseurId],
+        limit: 1,
+      );
+      if (f.isEmpty) throw Exception('Fournisseur introuvable');
+      if (f.first['est_fournisseur'] != 1 || f.first['actif'] != 1) {
+        throw Exception('Ce fournisseur est indisponible');
+      }
+      final fournisseurSysteme = f.first['systeme'] == 1;
+
+      // Les lignes
+      var totalHt = 0;
+      const totalTva = 0; // la TVA sera activée plus tard
+      final preparees = <Map<String, Object?>>[];
+
+      for (final l in lignes) {
+        final q = _arrondir(l.quantite);
+        if (q <= 0)
+          throw Exception('Chaque quantité doit être supérieure à zéro');
+        if (l.prixUnitaire < 0)
+          throw Exception('Un prix ne peut pas être négatif');
+
+        final art = await txn.query(
+          'articles',
+          columns: ['code', 'designation', 'actif'],
+          where: 'id = ?',
+          whereArgs: [l.articleId],
+          limit: 1,
+        );
+        if (art.isEmpty) throw Exception('Article introuvable');
+        if (art.first['actif'] != 1) {
+          throw Exception('« ${art.first['designation']} » est désactivé');
+        }
+
+        final ht = (q * l.prixUnitaire).round();
+        totalHt += ht;
+        preparees.add({
+          'article_id': l.articleId,
+          'code_article': art.first['code'],
+          'designation': art.first['designation'],
+          'quantite': q,
+          'prix_unitaire': l.prixUnitaire,
+          'taux_tva': 0.0,
+          'total_ht': ht,
+          'montant_tva': 0,
+        });
+      }
+      final totalTtc = totalHt + totalTva;
+
+      // Les paiements
+      var totalPaye = 0;
+      for (final p in paiements) {
+        if (p.montant <= 0) {
+          throw Exception('Chaque paiement doit être supérieur à zéro');
+        }
+        final mode = await txn.query(
+          'modes_paiement',
+          columns: ['libelle', 'reference_obligatoire', 'actif'],
+          where: 'id = ?',
+          whereArgs: [p.modeId],
+          limit: 1,
+        );
+        if (mode.isEmpty || mode.first['actif'] != 1) {
+          throw Exception('Mode de paiement indisponible');
+        }
+        if (mode.first['reference_obligatoire'] == 1 &&
+            (p.reference ?? '').trim().isEmpty) {
+          throw Exception(
+            'Une référence est obligatoire pour « ${mode.first['libelle']} »',
+          );
+        }
+        totalPaye += p.montant;
+      }
+
+      if (totalPaye > totalTtc) {
+        throw Exception("Les paiements dépassent le total de l'achat");
+      }
+      final reste = totalTtc - totalPaye;
+      if (reste > 0 && fournisseurSysteme) {
+        throw Exception(
+          'Un achat à crédit demande un fournisseur identifié '
+          "(pas « Fournisseur occasionnel »)",
+        );
+      }
+
+      // L'achat
+      final code = await _prochainMatricule(txn, 'achats');
+      final achatId = await txn.insert('achats', {
+        'code': code,
+        'agence_id': agence.id,
+        'fournisseur_id': fournisseurId,
+        'date_achat': dateTexte,
+        'reference_fournisseur': _videEnNull(referenceFournisseur),
+        'note': _videEnNull(note),
+        'total_ht': totalHt,
+        'total_tva': totalTva,
+        'total_ttc': totalTtc,
+        'statut': 'valide',
+        'utilisateur_id': utilisateur.id,
+        'cree_le': maintenant.toIso8601String(),
+      });
+
+      // Les lignes, l'entrée en stock et (si voulu) le dernier prix du catalogue
+      for (var i = 0; i < preparees.length; i++) {
+        final ligne = preparees[i];
+        await txn.insert('achat_lignes', {...ligne, 'achat_id': achatId});
+
+        await _mouvementStock(
+          txn,
+          articleId: ligne['article_id'] as int,
+          agenceId: agence.id,
+          utilisateurId: utilisateur.id,
+          type: 'entree',
+          quantite: ligne['quantite'] as double,
+          motif: 'Réception fournisseur',
+          commentaire: 'Achat $code',
+          sourceType: 'achat',
+          sourceId: achatId,
+        );
+
+        if (majPrixCatalogue && Session.peut('articles.gerer')) {
+          await txn.update(
+            'articles',
+            {'prix_achat': ligne['prix_unitaire']},
+            where: 'id = ?',
+            whereArgs: [ligne['article_id']],
+          );
+        }
+      }
+
+      // Les paiements
+      for (final p in paiements) {
+        await txn.insert('paiements', {
+          'type_document': 'achat',
+          'document_id': achatId,
+          'mode_id': p.modeId,
+          'montant': p.montant,
+          'reference': _videEnNull(p.reference),
+          'date_paiement': dateTexte,
+          'utilisateur_id': utilisateur.id,
+          'cree_le': maintenant.toIso8601String(),
+        });
+      }
+
+      return code;
+    });
+  }
+
+  // Les achats de l'agence courante, le plus récent d'abord
+  static Future<List<AchatResume>> listerAchats({
+    String recherche = '',
+    bool creditSeulement = false,
+  }) async {
+    if (!Session.peut('achats.voir') && !Session.peut('achats.creer')) {
+      throw Exception('Action non autorisée');
+    }
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final args = <Object>[agence.id];
+    var filtre = '';
+    final texte = recherche.trim();
+    if (texte.isNotEmpty) {
+      filtre = 'AND (a.code LIKE ? OR t.nom LIKE ? OR a.reference_fournisseur LIKE ?)';
+      args.addAll(List.filled(3, '%$texte%'));
+    }
+
+    final lignes = await db.rawQuery('''
+      SELECT a.id, a.code, a.date_achat, a.reference_fournisseur, a.total_ttc,
+             a.statut, t.nom AS fournisseur,
+             COALESCE((SELECT SUM(p.montant) FROM paiements p
+                       WHERE p.type_document = 'achat' AND p.document_id = a.id), 0) AS paye
+      FROM achats a
+      INNER JOIN tiers t ON t.id = a.fournisseur_id
+      WHERE a.agence_id = ? $filtre
+      ORDER BY a.date_achat DESC, a.id DESC
+      LIMIT 300
+    ''', args);
+
+    final liste = lignes.map(AchatResume.fromMap).toList();
+    return creditSeulement
+        ? liste.where((a) => a.statut == 'valide' && a.reste > 0).toList()
+        : liste;
+  }
+
+  static Future<AchatDetail> detailAchat(int id) async {
+    if (!Session.peut('achats.voir') && !Session.peut('achats.creer')) {
+      throw Exception('Action non autorisée');
+    }
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final entete = await db.rawQuery(
+      '''
+      SELECT a.code, a.date_achat, a.reference_fournisseur, a.note, a.statut,
+             a.total_ht, a.total_tva, a.total_ttc,
+             t.nom AS fournisseur, u.nom_complet AS utilisateur, ag.nom AS agence
+      FROM achats a
+      INNER JOIN tiers t ON t.id = a.fournisseur_id
+      INNER JOIN utilisateurs u ON u.id = a.utilisateur_id
+      INNER JOIN agences ag ON ag.id = a.agence_id
+      WHERE a.id = ? AND a.agence_id = ?
+    ''',
+      [id, agence.id],
+    );
+    if (entete.isEmpty) throw Exception('Achat introuvable');
+
+    final lignes = await db.query(
+      'achat_lignes',
+      where: 'achat_id = ?',
+      whereArgs: [id],
+      orderBy: 'id',
+    );
+
+    final paiements = await db.rawQuery(
+      '''
+      SELECT p.montant, p.reference, p.date_paiement,
+             m.libelle AS mode, u.nom_complet AS utilisateur
+      FROM paiements p
+      INNER JOIN modes_paiement m ON m.id = p.mode_id
+      INNER JOIN utilisateurs u ON u.id = p.utilisateur_id
+      WHERE p.type_document = 'achat' AND p.document_id = ?
+      ORDER BY p.id
+    ''',
+      [id],
+    );
+
+    final e = entete.first;
+    return AchatDetail(
+      code: e['code'] as String,
+      date: DateTime.parse(e['date_achat'] as String),
+      fournisseur: e['fournisseur'] as String,
+      referenceFournisseur: e['reference_fournisseur'] as String?,
+      note: e['note'] as String?,
+      agence: e['agence'] as String,
+      utilisateur: e['utilisateur'] as String,
+      statut: e['statut'] as String,
+      totalHt: e['total_ht'] as int,
+      totalTva: e['total_tva'] as int,
+      totalTtc: e['total_ttc'] as int,
+      lignes: lignes.map(LigneAchat.fromMap).toList(),
+      paiements: paiements.map(PaiementAchat.fromMap).toList(),
     );
   }
 }
