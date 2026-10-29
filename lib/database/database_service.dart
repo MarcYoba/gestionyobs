@@ -13,6 +13,10 @@ import 'package:gestionyobs/modules/tiers.dart';
 import 'package:gestionyobs/modules/mode_paiement.dart';
 import 'package:gestionyobs/modules/compte_comptable.dart';
 
+import 'package:gestionyobs/association/association.dart';
+import 'package:gestionyobs/modules/postes_comptables.dart';
+import 'package:gestionyobs/modules/classe_article.dart';
+
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
 class DatabaseService {
@@ -33,7 +37,11 @@ class DatabaseService {
   // Version 8 : modes de paiement.
   //static const int _versionBase = 8;
   // Version 9 : plan comptable.
-  static const int _versionBase = 9;
+  //static const int _versionBase = 9;
+  // Version 10 : associations comptables et leur historique.
+  //static const int _versionBase = 10;
+  // Version 11 : classes d'articles (remplacent les catégories en texte libre).
+  static const int _versionBase = 11;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -68,6 +76,8 @@ class DatabaseService {
           await _creerTableModesPaiement(db);
           await _creerModesParDefaut(db);
           await _creerTableComptes(db);
+          await _creerTablesAssociations(db);
+          await _migrerClasses(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -96,6 +106,12 @@ class DatabaseService {
           }
           if (ancienneVersion < 9) {
             await _creerTableComptes(db);
+          }
+          if (ancienneVersion < 10) {
+            await _creerTablesAssociations(db);
+          }
+          if (ancienneVersion < 11) {
+            await _migrerClasses(db);
           }
         },
       ),
@@ -753,20 +769,26 @@ class DatabaseService {
     final conditions = <String>[];
     final args = <Object>[];
 
-    if (!inclureInactifs) conditions.add('actif = 1');
+    if (!inclureInactifs) conditions.add('a.actif = 1');
 
     final texte = recherche.trim();
     if (texte.isNotEmpty) {
-      conditions.add('(code LIKE ? OR designation LIKE ? OR categorie LIKE ?)');
+      conditions.add(
+        '(a.code LIKE ? OR a.designation LIKE ? OR cl.nom LIKE ?)',
+      );
       args.addAll(['%$texte%', '%$texte%', '%$texte%']);
     }
 
-    final lignes = await db.query(
-      'articles',
-      where: conditions.isEmpty ? null : conditions.join(' AND '),
-      whereArgs: args.isEmpty ? null : args,
-      orderBy: 'designation COLLATE NOCASE',
-    );
+    final where = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+
+    final lignes = await db.rawQuery('''
+      SELECT a.id, a.code, a.designation, a.classe_id, cl.nom AS categorie,
+             a.unite, a.prix_achat, a.prix_vente, a.seuil_alerte, a.actif
+      FROM articles a
+      LEFT JOIN classes_articles cl ON cl.id = a.classe_id
+      $where
+      ORDER BY a.designation COLLATE NOCASE
+    ''', args);
 
     // Le prix d'achat n'est lu que pour ceux qui ont le droit de le voir
     final voirPrixAchat = Session.peut('achats.prix_achat_voir');
@@ -786,9 +808,10 @@ class DatabaseService {
   }
 
   // Retourne le matricule attribué à l'article
+  // Retourne le matricule attribué à l'article
   static Future<String> creerArticle({
     required String designation,
-    String? categorie,
+    int? classeId,
     required String unite,
     int? prixAchat,
     required int prixVente,
@@ -796,15 +819,13 @@ class DatabaseService {
   }) async {
     Session.exiger('articles.gerer');
 
-    // Transaction : le numéro est calculé et utilisé sans que rien
-    // ne puisse s'intercaler entre les deux
     return db.transaction((txn) async {
       final code = await _prochainMatricule(txn, 'articles');
 
       await txn.insert('articles', {
         'code': code,
         'designation': designation,
-        'categorie': _videEnNull(categorie),
+        'classe_id': classeId,
         'unite': unite,
         'prix_achat': Session.peut('achats.prix_achat_voir') ? prixAchat : null,
         'prix_vente': prixVente,
@@ -820,7 +841,7 @@ class DatabaseService {
   static Future<void> modifierArticle({
     required int id,
     required String designation,
-    String? categorie,
+    int? classeId,
     required String unite,
     int? prixAchat,
     required int prixVente,
@@ -831,7 +852,7 @@ class DatabaseService {
 
     final valeurs = <String, Object?>{
       'designation': designation,
-      'categorie': _videEnNull(categorie),
+      'classe_id': classeId,
       'unite': unite,
       'prix_vente': prixVente,
       'seuil_alerte': seuilAlerte,
@@ -946,15 +967,15 @@ class DatabaseService {
 
     final texte = recherche.trim();
     if (texte.isNotEmpty) {
-      filtre =
-          'AND (a.code LIKE ? OR a.designation LIKE ? OR a.categorie LIKE ?)';
+      filtre = 'AND (a.code LIKE ? OR a.designation LIKE ? OR cl.nom LIKE ?)';
       args.addAll(['%$texte%', '%$texte%', '%$texte%']);
     }
 
     final lignes = await db.rawQuery('''
-      SELECT a.id, a.code, a.designation, a.categorie, a.unite, a.seuil_alerte,
-             COALESCE(s.quantite, 0) AS quantite
+      SELECT a.id, a.code, a.designation, cl.nom AS categorie, a.unite,
+             a.seuil_alerte, COALESCE(s.quantite, 0) AS quantite
       FROM articles a
+      LEFT JOIN classes_articles cl ON cl.id = a.classe_id
       LEFT JOIN stock s ON s.article_id = a.id AND s.agence_id = ?
       WHERE a.actif = 1 $filtre
       ORDER BY a.designation COLLATE NOCASE
@@ -1669,6 +1690,465 @@ class DatabaseService {
       ajoutes: ajoutes,
       misAJour: misAJour,
       inchanges: inchanges,
+    );
+  }
+
+  // ---------- Associations comptables ----------
+
+  static Future<void> _creerTablesAssociations(Database db) async {
+    // Un compte pour un poste, dans une portée : le défaut, ou une agence
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS associations_comptables (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        poste TEXT NOT NULL,
+        portee TEXT NOT NULL DEFAULT 'defaut',
+        portee_id INTEGER NOT NULL DEFAULT 0,
+        compte_id INTEGER NOT NULL,
+        cree_le TEXT NOT NULL,
+        modifie_le TEXT NOT NULL,
+        UNIQUE (poste, portee, portee_id),
+        FOREIGN KEY (compte_id) REFERENCES comptes_comptables(id)
+      )
+    ''');
+
+    // La trace de chaque changement, avec les numéros de compte de l'époque
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS historique_associations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        poste TEXT NOT NULL,
+        portee TEXT NOT NULL,
+        portee_id INTEGER NOT NULL,
+        ancien_compte TEXT,
+        nouveau_compte TEXT,
+        utilisateur_id INTEGER NOT NULL,
+        cree_le TEXT NOT NULL,
+        FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id)
+      )
+    ''');
+  }
+
+  // Les postes fixes + un poste par mode de paiement
+  static Future<List<PosteComptable>> listerPostes() async {
+    final modes = await listerModesPaiement(inclureInactifs: true);
+    return [
+      ...cataloguePostes,
+      for (final m in modes)
+        PosteComptable(
+          'paiement.${m.code}',
+          m.libelle,
+          'Paiements',
+          'Compte de trésorerie pour les paiements en ${m.libelle}',
+          propositionsPaiement[m.type] ?? const [],
+          parAgence: true,
+        ),
+    ];
+  }
+
+  static Future<List<Agence>> listerToutesLesAgences() async {
+    _exigerVueCompta();
+    final lignes = await db.query(
+      'agences',
+      where: 'actif = 1',
+      orderBy: 'nom',
+    );
+    return lignes.map(Agence.fromMap).toList();
+  }
+
+  static Future<List<Association>> listerAssociations() async {
+    _exigerVueCompta();
+    final lignes = await db.rawQuery('''
+      SELECT a.id, a.poste, a.portee, a.portee_id, a.compte_id,
+             c.numero, c.intitule, ag.nom AS agence_nom, cl.nom AS classe_nom
+      FROM associations_comptables a
+      INNER JOIN comptes_comptables c ON c.id = a.compte_id
+      LEFT JOIN agences ag ON a.portee = 'agence' AND ag.id = a.portee_id
+      LEFT JOIN classes_articles cl ON a.portee = 'classe' AND cl.id = a.portee_id
+      ORDER BY a.poste, a.portee, ag.nom, cl.nom
+    ''');
+    return lignes.map(Association.fromMap).toList();
+  }
+
+  static Future<void> _noterHistorique(
+    DatabaseExecutor executeur,
+    String poste,
+    String portee,
+    int porteeId,
+    String? ancien,
+    String? nouveau,
+  ) async {
+    await executeur.insert('historique_associations', {
+      'poste': poste,
+      'portee': portee,
+      'portee_id': porteeId,
+      'ancien_compte': ancien,
+      'nouveau_compte': nouveau,
+      'utilisateur_id': Session.utilisateurCourant!.id,
+      'cree_le': DateTime.now().toIso8601String(),
+    });
+  }
+
+  // Relie un poste à un compte (le crée ou remplace l'ancien). Tout est tracé.
+  static Future<void> definirAssociation({
+    required String poste,
+    required int compteId,
+    String portee = 'defaut', // 'defaut', 'agence' ou 'classe'
+    int porteeId = 0,
+  }) async {
+    Session.exiger('comptabilite.gerer');
+
+    final postes = await listerPostes();
+    final definition = postes.where((p) => p.code == poste).toList();
+    if (definition.isEmpty) throw Exception('Poste comptable inconnu');
+    if (portee != 'defaut' && portee != 'agence' && portee != 'classe') {
+      throw Exception('Portée inconnue');
+    }
+    if (portee == 'agence' && !definition.first.parAgence) {
+      throw Exception("Ce poste n'accepte pas de compte par agence");
+    }
+    if (portee == 'classe' && !definition.first.parClasse) {
+      throw Exception("Ce poste n'accepte pas de compte par classe d'articles");
+    }
+    final pid = portee == 'defaut' ? 0 : porteeId;
+
+    await db.transaction((txn) async {
+      final compte = await txn.query(
+        'comptes_comptables',
+        columns: ['numero', 'actif'],
+        where: 'id = ?',
+        whereArgs: [compteId],
+        limit: 1,
+      );
+      if (compte.isEmpty) throw Exception('Compte introuvable');
+      if (compte.first['actif'] != 1)
+        throw Exception('Ce compte est désactivé');
+
+      if (portee == 'agence') {
+        final agence = await txn.query(
+          'agences',
+          columns: ['id'],
+          where: 'id = ?',
+          whereArgs: [pid],
+          limit: 1,
+        );
+        if (agence.isEmpty) throw Exception('Agence introuvable');
+      }
+
+      if (portee == 'classe') {
+        final classe = await txn.query(
+          'classes_articles',
+          columns: ['id'],
+          where: 'id = ?',
+          whereArgs: [pid],
+          limit: 1,
+        );
+        if (classe.isEmpty) throw Exception('Classe introuvable');
+      }
+
+      final actuel = await txn.rawQuery(
+        '''
+        SELECT a.compte_id, c.numero
+        FROM associations_comptables a
+        INNER JOIN comptes_comptables c ON c.id = a.compte_id
+        WHERE a.poste = ? AND a.portee = ? AND a.portee_id = ?
+      ''',
+        [poste, portee, pid],
+      );
+
+      if (actuel.isNotEmpty && actuel.first['compte_id'] == compteId) {
+        return; // rien à changer
+      }
+
+      final maintenant = DateTime.now().toIso8601String();
+      await txn.execute(
+        '''
+        INSERT INTO associations_comptables
+          (poste, portee, portee_id, compte_id, cree_le, modifie_le)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(poste, portee, portee_id) DO UPDATE SET
+          compte_id = excluded.compte_id,
+          modifie_le = excluded.modifie_le
+      ''',
+        [poste, portee, pid, compteId, maintenant, maintenant],
+      );
+
+      await _noterHistorique(
+        txn,
+        poste,
+        portee,
+        pid,
+        actuel.isEmpty ? null : actuel.first['numero'] as String,
+        compte.first['numero'] as String,
+      );
+    });
+  }
+
+  static Future<void> supprimerAssociation({
+    required String poste,
+    String portee = 'defaut',
+    int porteeId = 0,
+  }) async {
+    Session.exiger('comptabilite.gerer');
+
+    final pid = portee == 'defaut' ? 0 : porteeId;
+
+    await db.transaction((txn) async {
+      final actuel = await txn.rawQuery(
+        '''
+        SELECT c.numero
+        FROM associations_comptables a
+        INNER JOIN comptes_comptables c ON c.id = a.compte_id
+        WHERE a.poste = ? AND a.portee = ? AND a.portee_id = ?
+      ''',
+        [poste, portee, pid],
+      );
+      if (actuel.isEmpty) return;
+
+      await txn.delete(
+        'associations_comptables',
+        where: 'poste = ? AND portee = ? AND portee_id = ?',
+        whereArgs: [poste, portee, pid],
+      );
+
+      await _noterHistorique(
+        txn,
+        poste,
+        portee,
+        pid,
+        actuel.first['numero'] as String,
+        null,
+      );
+    });
+  }
+
+  // Applique les comptes proposés aux postes qui n'ont encore aucun compte
+  static Future<ResultatPropositions> appliquerPropositions() async {
+    Session.exiger('comptabilite.gerer');
+
+    final postes = await listerPostes();
+    final comptes = await listerComptes();
+    final associations = await listerAssociations();
+
+    final parNumero = {for (final c in comptes) c.numero: c};
+    final dejaAssocies = associations
+        .where((a) => a.portee == 'defaut')
+        .map((a) => a.poste)
+        .toSet();
+
+    var appliquees = 0;
+    var ignorees = 0;
+
+    for (final p in postes) {
+      if (dejaAssocies.contains(p.code)) continue;
+
+      // Le premier compte proposé qui existe, est actif et n'est pas
+      // un compte de regroupement
+      CompteComptable? trouve;
+      for (final numero in p.propositions) {
+        final c = parNumero[numero];
+        if (c != null && c.actif && c.imputable) {
+          trouve = c;
+          break;
+        }
+      }
+
+      if (trouve == null) {
+        ignorees++;
+        continue;
+      }
+
+      await definirAssociation(poste: p.code, compteId: trouve.id);
+      appliquees++;
+    }
+
+    return ResultatPropositions(appliquees: appliquees, ignorees: ignorees);
+  }
+
+  static Future<List<HistoriqueAssociation>> listerHistorique({
+    int limite = 300,
+  }) async {
+    _exigerVueCompta();
+    final lignes = await db.rawQuery(
+      '''
+      SELECT h.poste, h.portee, h.ancien_compte, h.nouveau_compte, h.cree_le,
+             u.nom_complet AS utilisateur, ag.nom AS agence_nom,
+             cl.nom AS classe_nom
+      FROM historique_associations h
+      INNER JOIN utilisateurs u ON u.id = h.utilisateur_id
+      LEFT JOIN agences ag ON h.portee = 'agence' AND ag.id = h.portee_id
+      LEFT JOIN classes_articles cl ON h.portee = 'classe' AND cl.id = h.portee_id
+      ORDER BY h.id DESC
+      LIMIT ?
+    ''',
+      [limite],
+    );
+    return lignes.map(HistoriqueAssociation.fromMap).toList();
+  }
+
+  // ---------- Classes d'articles ----------
+
+  // Crée la table, rattache les articles et reprend les anciennes catégories
+  static Future<void> _migrerClasses(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS classes_articles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nom TEXT NOT NULL UNIQUE,
+        actif INTEGER NOT NULL DEFAULT 1,
+        cree_le TEXT NOT NULL
+      )
+    ''');
+
+    if (!await _colonneExiste(db, 'articles', 'classe_id')) {
+      await db.execute(
+        'ALTER TABLE articles ADD COLUMN classe_id INTEGER '
+        'REFERENCES classes_articles(id)',
+      );
+    }
+
+    // Les catégories saisies à la main deviennent des classes
+    if (await _colonneExiste(db, 'articles', 'categorie')) {
+      final articles = await db.rawQuery(
+        'SELECT id, TRIM(categorie) AS categorie FROM articles '
+        "WHERE categorie IS NOT NULL AND TRIM(categorie) != '' ORDER BY id",
+      );
+
+      final classes = <String, int>{}; // nom en minuscules -> numéro de classe
+      final maintenant = DateTime.now().toIso8601String();
+
+      for (final a in articles) {
+        final nom = (a['categorie'] as String).replaceAll(RegExp(r'\s+'), ' ');
+        final cle = nom.toLowerCase();
+
+        var classeId = classes[cle];
+        if (classeId == null) {
+          classeId = await db.insert('classes_articles', {
+            'nom': nom,
+            'actif': 1,
+            'cree_le': maintenant,
+          });
+          classes[cle] = classeId;
+        }
+
+        await db.update(
+          'articles',
+          {'classe_id': classeId},
+          where: 'id = ?',
+          whereArgs: [a['id']],
+        );
+      }
+
+      // L'ancienne colonne est renommée : elle ne sert plus
+      await db.execute(
+        'ALTER TABLE articles RENAME COLUMN categorie TO categorie_ancienne',
+      );
+    }
+  }
+
+  // Lecture libre : la fiche article en a besoin
+  static Future<List<ClasseArticle>> listerClasses({
+    bool inclureInactives = false,
+  }) async {
+    final lignes = await db.rawQuery('''
+      SELECT cl.id, cl.nom, cl.actif,
+             (SELECT COUNT(*) FROM articles a WHERE a.classe_id = cl.id) AS nb
+      FROM classes_articles cl
+      ${inclureInactives ? '' : 'WHERE cl.actif = 1'}
+      ORDER BY cl.nom COLLATE NOCASE
+    ''');
+
+    return lignes
+        .map(
+          (m) => ClasseArticle(
+            id: m['id'] as int,
+            nom: m['nom'] as String,
+            actif: (m['actif'] as int) == 1,
+            nbArticles: m['nb'] as int,
+          ),
+        )
+        .toList();
+  }
+
+  // Compare sans tenir compte des majuscules (accents compris)
+  static Future<void> _verifierClasseLibre(String nom, {int? sauf}) async {
+    final lignes = await db.query('classes_articles', columns: ['id', 'nom']);
+    for (final m in lignes) {
+      if (m['id'] == sauf) continue;
+      if ((m['nom'] as String).toLowerCase() == nom.toLowerCase()) {
+        throw Exception('Une classe porte déjà ce nom');
+      }
+    }
+  }
+
+  static Future<int> creerClasse(String nom) async {
+    Session.exiger('articles.gerer');
+
+    final propre = nom.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (propre.isEmpty) throw Exception('Le nom est vide');
+    await _verifierClasseLibre(propre);
+
+    return db.insert('classes_articles', {
+      'nom': propre,
+      'actif': 1,
+      'cree_le': DateTime.now().toIso8601String(),
+    });
+  }
+
+  static Future<void> modifierClasse({
+    required int id,
+    required String nom,
+    required bool actif,
+  }) async {
+    Session.exiger('articles.gerer');
+
+    final propre = nom.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (propre.isEmpty) throw Exception('Le nom est vide');
+    await _verifierClasseLibre(propre, sauf: id);
+
+    await db.update(
+      'classes_articles',
+      {'nom': propre, 'actif': actif ? 1 : 0},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  // Le compte retenu pour un poste, selon la règle :
+  // classe de l'article, puis agence, puis compte par défaut.
+  // Aucun droit exigé : c'est une fonction interne, appelée à la caisse.
+  static Future<ComptePourPoste?> resoudreCompte({
+    required String poste,
+    int? agenceId,
+    int? classeId,
+  }) async {
+    final postes = await listerPostes();
+    final definition = postes.where((p) => p.code == poste).toList();
+    if (definition.isEmpty) throw Exception('Poste comptable inconnu');
+    final d = definition.first;
+
+    final lignes = await db.rawQuery(
+      '''
+      SELECT c.numero, c.intitule, a.portee
+      FROM associations_comptables a
+      INNER JOIN comptes_comptables c ON c.id = a.compte_id
+      WHERE a.poste = ?
+        AND ((a.portee = 'classe' AND a.portee_id = ?)
+          OR (a.portee = 'agence' AND a.portee_id = ?)
+          OR a.portee = 'defaut')
+      ORDER BY CASE a.portee WHEN 'classe' THEN 1 WHEN 'agence' THEN 2 ELSE 3 END
+      LIMIT 1
+    ''',
+      [
+        poste,
+        d.parClasse ? (classeId ?? -1) : -1,
+        d.parAgence ? (agenceId ?? -1) : -1,
+      ],
+    );
+
+    if (lignes.isEmpty) return null;
+    final m = lignes.first;
+    return ComptePourPoste(
+      numero: m['numero'] as String,
+      intitule: m['intitule'] as String,
+      origine: m['portee'] as String,
     );
   }
 }

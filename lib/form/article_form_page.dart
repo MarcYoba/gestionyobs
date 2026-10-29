@@ -4,6 +4,7 @@ import 'package:gestionyobs/error/acces_refuse.dart';
 import 'package:gestionyobs/modules/article.dart';
 import 'package:gestionyobs/database/database_service.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
+import 'package:gestionyobs/modules/classe_article.dart';
 
 class ArticleFormPage extends StatefulWidget {
   final Article? article; // null = nouvel article
@@ -18,14 +19,17 @@ class _ArticleFormPageState extends State<ArticleFormPage> {
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _codeController;
   late final TextEditingController _designationController;
-  late final TextEditingController _categorieController;
+  // late final TextEditingController _categorieController;
   late final TextEditingController _prixVenteController;
   late final TextEditingController _prixAchatController;
   late final TextEditingController _seuilController;
+  int? _classeId;
+  List<ClasseArticle> _classes = [];
+  bool _classesChargees = false;
   late String _unite;
   late bool _actif;
 
-  List<String> _categories = [];
+  // List<String> _categories = [];
   bool _chargement = false;
   String? _erreur;
 
@@ -38,7 +42,8 @@ class _ArticleFormPageState extends State<ArticleFormPage> {
     final a = widget.article;
     _codeController = TextEditingController(text: a?.code ?? '');
     _designationController = TextEditingController(text: a?.designation ?? '');
-    _categorieController = TextEditingController(text: a?.categorie ?? '');
+    // _categorieController = TextEditingController(text: a?.categorie ?? '');
+    _classeId = a?.classeId;
     _prixVenteController = TextEditingController(
       text: a == null ? '' : a.prixVente.toString(),
     );
@@ -50,7 +55,8 @@ class _ArticleFormPageState extends State<ArticleFormPage> {
     );
     _unite = a?.unite ?? unitesDisponibles.first;
     _actif = a?.actif ?? true;
-    _chargerCategories();
+    // _chargerCategories();
+    _chargerClasses();
     if (a == null) _chargerApercu();
   }
 
@@ -58,17 +64,25 @@ class _ArticleFormPageState extends State<ArticleFormPage> {
   void dispose() {
     _codeController.dispose();
     _designationController.dispose();
-    _categorieController.dispose();
+    //_categorieController.dispose();
     _prixVenteController.dispose();
     _prixAchatController.dispose();
     _seuilController.dispose();
     super.dispose();
   }
 
-  Future<void> _chargerCategories() async {
-    final categories = await DatabaseService.categoriesArticles();
+  // Future<void> _chargerCategories() async {
+  //   final categories = await DatabaseService.categoriesArticles();
+  //   if (!mounted) return;
+  //   setState(() => _categories = categories);
+  // }
+  Future<void> _chargerClasses() async {
+    final classes = await DatabaseService.listerClasses(inclureInactives: true);
     if (!mounted) return;
-    setState(() => _categories = categories);
+    setState(() {
+      _classes = classes;
+      _classesChargees = true;
+    });
   }
 
   // Montre le prochain matricule (attribué définitivement à l'enregistrement)
@@ -88,7 +102,7 @@ class _ArticleFormPageState extends State<ArticleFormPage> {
 
     try {
       final designation = _designationController.text.trim();
-      final categorie = _categorieController.text.trim();
+      // final categorie = _categorieController.text.trim();
       final prixVente = int.parse(_prixVenteController.text.trim());
       final prixAchatTexte = _prixAchatController.text.trim();
       final prixAchat = prixAchatTexte.isEmpty
@@ -101,7 +115,8 @@ class _ArticleFormPageState extends State<ArticleFormPage> {
         await DatabaseService.modifierArticle(
           id: widget.article!.id,
           designation: designation,
-          categorie: categorie,
+          //categorie: categorie,
+          classeId: _classeId,
           unite: _unite,
           prixAchat: prixAchat,
           prixVente: prixVente,
@@ -111,7 +126,8 @@ class _ArticleFormPageState extends State<ArticleFormPage> {
       } else {
         final codeCree = await DatabaseService.creerArticle(
           designation: designation,
-          categorie: categorie,
+          // categorie: categorie,
+          classeId: _classeId,
           unite: _unite,
           prixAchat: prixAchat,
           prixVente: prixVente,
@@ -198,31 +214,57 @@ class _ArticleFormPageState extends State<ArticleFormPage> {
                       const SizedBox(height: 16),
 
                       TextFormField(
-                        controller: _categorieController,
+                        // controller: _categorieController,
                         decoration: const InputDecoration(
                           labelText: 'Catégorie (facultatif)',
                           prefixIcon: Icon(Icons.category),
                           border: OutlineInputBorder(),
                         ),
                       ),
-                      if (_categories.isNotEmpty) ...[
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 6,
-                          children: _categories
-                              .map(
-                                (c) => ActionChip(
-                                  label: Text(c),
-                                  visualDensity: VisualDensity.compact,
-                                  onPressed: () => setState(
-                                    () => _categorieController.text = c,
+                      // if (_categories.isNotEmpty) ...[
+                      //   const SizedBox(height: 8),
+                      //   Wrap(
+                      //     spacing: 6,
+                      //     runSpacing: 6,
+                      //     children: _categories
+                      //         .map(
+                      //           (c) => ActionChip(
+                      //             label: Text(c),
+                      //             visualDensity: VisualDensity.compact,
+                      //             onPressed: () => setState(
+                      //               () => _categorieController.text = c,
+                      //             ),
+                      //           ),
+                      //         )
+                      //         .toList(),
+                      //   ),
+                      // ],
+                      if (!_classesChargees)
+                        const LinearProgressIndicator()
+                      else
+                        DropdownButtonFormField<int?>(
+                          initialValue: _classeId,
+                          decoration: const InputDecoration(
+                            labelText: "Classe d'articles (facultatif)",
+                            prefixIcon: Icon(Icons.category),
+                            border: OutlineInputBorder(),
+                          ),
+                          items: [
+                            const DropdownMenuItem<int?>(
+                              value: null,
+                              child: Text('Aucune classe'),
+                            ),
+                            for (final c in _classes)
+                              if (c.actif || c.id == _classeId)
+                                DropdownMenuItem<int?>(
+                                  value: c.id,
+                                  child: Text(
+                                    c.actif ? c.nom : '${c.nom} (désactivée)',
                                   ),
                                 ),
-                              )
-                              .toList(),
+                          ],
+                          onChanged: (v) => setState(() => _classeId = v),
                         ),
-                      ],
                       const SizedBox(height: 16),
 
                       DropdownButtonFormField<String>(

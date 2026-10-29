@@ -11,6 +11,8 @@ import 'package:gestionyobs/page/stock_page.dart';
 import 'package:gestionyobs/page/tiers_page.dart';
 import 'package:gestionyobs/page/modes_paiement_page.dart';
 import 'package:gestionyobs/page/plan_comptable_page.dart';
+import 'package:gestionyobs/page/associations_page.dart';
+import 'package:gestionyobs/page/classes_articles_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -127,6 +129,25 @@ class HomePage extends StatelessWidget {
         icone: Icons.menu_book,
         permissions: ['comptabilite.voir', 'comptabilite.gerer'],
         ouvrir: (_) => const PlanComptablePage(),
+      ),
+      _Module(
+        titre: 'Associations comptables',
+        description: 'Quel compte pour chaque poste',
+        icone: Icons.account_tree,
+        permissions: ['comptabilite.voir', 'comptabilite.gerer'],
+        ouvrir: (_) => const AssociationsPage(),
+      ),
+      _Module(
+        titre: "Classes d'articles",
+        description: 'Familles de produits et comptes',
+        icone: Icons.category,
+        permissions: [
+          'articles.voir',
+          'articles.gerer',
+          'comptabilite.voir',
+          'comptabilite.gerer',
+        ],
+        ouvrir: (_) => const ClassesArticlesPage(),
       ),
     ];
 
