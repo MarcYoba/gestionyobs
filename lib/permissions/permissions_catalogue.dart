@@ -18,6 +18,13 @@ const List<PermissionDef> cataloguePermissions = [
   PermissionDef('ventes.voir', 'Voir les ventes', 'Ventes'),
   PermissionDef('ventes.creer', 'Enregistrer une vente (caisse)', 'Ventes'),
   PermissionDef('ventes.annuler', 'Annuler une vente', 'Ventes'),
+  PermissionDef('ventes.remise', 'Accorder une remise sur une vente', 'Ventes'),
+  PermissionDef(
+    'ventes.modifier_prix',
+    'Modifier le prix de vente à la caisse',
+    'Ventes',
+    adminSeulement: true,
+  ),
   PermissionDef('stock.voir', 'Consulter le stock', 'Stock'),
   PermissionDef(
     'stock.modifier',
@@ -89,6 +96,21 @@ const List<PermissionDef> cataloguePermissions = [
     'Gérer les modes de paiement',
     'Administration',
     adminSeulement: true,
+  ),
+  PermissionDef(
+    'comptabilite.voir',
+    'Consulter le plan comptable',
+    'Comptabilité',
+  ),
+  PermissionDef(
+    'comptabilite.gerer',
+    'Gérer le plan comptable et importer un plan',
+    'Comptabilité',
+  ),
+  PermissionDef(
+    'achats.creer',
+    'Enregistrer un achat et réceptionner la marchandise',
+    'Achats',
   ),
 ];
 

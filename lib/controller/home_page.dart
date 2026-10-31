@@ -10,6 +10,11 @@ import 'package:gestionyobs/page/articles_page.dart';
 import 'package:gestionyobs/page/stock_page.dart';
 import 'package:gestionyobs/page/tiers_page.dart';
 import 'package:gestionyobs/page/modes_paiement_page.dart';
+import 'package:gestionyobs/page/plan_comptable_page.dart';
+import 'package:gestionyobs/page/associations_page.dart';
+import 'package:gestionyobs/page/classes_articles_page.dart';
+import 'package:gestionyobs/page/achats_page.dart';
+import 'package:gestionyobs/page/ventes_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -59,11 +64,12 @@ class HomePage extends StatelessWidget {
 
     // La liste complète des modules du logiciel
     final modules = <_Module>[
-      _bientot(
-        'Ventes',
-        'Caisse et historique des ventes',
-        Icons.point_of_sale,
-        ['ventes.creer', 'ventes.voir'],
+      _Module(
+        titre: 'Ventes',
+        description: 'Caisse, factures et crédits',
+        icone: Icons.point_of_sale,
+        permissions: ['ventes.creer', 'ventes.voir'],
+        ouvrir: (_) => const VentesPage(),
       ),
       _Module(
         titre: 'Articles',
@@ -93,9 +99,25 @@ class HomePage extends StatelessWidget {
         permissions: ['fournisseurs.voir', 'fournisseurs.gerer'],
         ouvrir: (_) => const TiersPage(type: 'fournisseur'),
       ),
-      _bientot('Achats', 'Achats et fournisseurs', Icons.shopping_cart, [
-        'achats.voir',
-      ]),
+      _Module(
+        titre: "Classes d'articles",
+        description: 'Familles de produits et comptes',
+        icone: Icons.category,
+        permissions: [
+          'articles.voir',
+          'articles.gerer',
+          'comptabilite.voir',
+          'comptabilite.gerer',
+        ],
+        ouvrir: (_) => const ClassesArticlesPage(),
+      ),
+      _Module(
+        titre: 'Achats',
+        description: 'Achats, paiements et dettes',
+        icone: Icons.shopping_cart,
+        permissions: ['achats.voir', 'achats.creer'],
+        ouvrir: (_) => const AchatsPage(),
+      ),
       _bientot('Rapports', 'Rapports et finances', Icons.bar_chart, [
         'rapports.voir',
       ]),
@@ -119,6 +141,20 @@ class HomePage extends StatelessWidget {
         icone: Icons.payments,
         permissions: ['paiements.gerer'],
         ouvrir: (_) => const ModesPaiementPage(),
+      ),
+      _Module(
+        titre: 'Plan comptable',
+        description: 'Comptes et import du plan',
+        icone: Icons.menu_book,
+        permissions: ['comptabilite.voir', 'comptabilite.gerer'],
+        ouvrir: (_) => const PlanComptablePage(),
+      ),
+      _Module(
+        titre: 'Associations comptables',
+        description: 'Quel compte pour chaque poste',
+        icone: Icons.account_tree,
+        permissions: ['comptabilite.voir', 'comptabilite.gerer'],
+        ouvrir: (_) => const AssociationsPage(),
       ),
     ];
 

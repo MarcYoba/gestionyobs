@@ -22,6 +22,7 @@ class Article {
   final int prixVente;
   final double seuilAlerte;
   final bool actif;
+  final int? classeId;
 
   const Article({
     required this.id,
@@ -33,6 +34,7 @@ class Article {
     required this.prixVente,
     required this.seuilAlerte,
     required this.actif,
+    required this.classeId,
   });
 
   factory Article.fromMap(
@@ -48,6 +50,7 @@ class Article {
     prixVente: m['prix_vente'] as int,
     seuilAlerte: (m['seuil_alerte'] as num).toDouble(),
     actif: (m['actif'] as int) == 1,
+    classeId: m['classe_id'] as int?,
   );
 }
 
