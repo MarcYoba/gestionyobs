@@ -15,6 +15,7 @@ import 'package:gestionyobs/page/associations_page.dart';
 import 'package:gestionyobs/page/classes_articles_page.dart';
 import 'package:gestionyobs/page/achats_page.dart';
 import 'package:gestionyobs/page/ventes_page.dart';
+import 'package:gestionyobs/page/impression_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -70,6 +71,13 @@ class HomePage extends StatelessWidget {
         icone: Icons.point_of_sale,
         permissions: ['ventes.creer', 'ventes.voir'],
         ouvrir: (_) => const VentesPage(),
+      ),
+      _Module(
+        titre: 'Impression',
+        description: 'Imprimante, papier 58 ou 80 mm, en-tête',
+        icone: Icons.print,
+        permissions: ['ventes.creer', 'ventes.voir', 'parametres.gerer'],
+        ouvrir: (_) => const ImpressionPage(),
       ),
       _Module(
         titre: 'Articles',

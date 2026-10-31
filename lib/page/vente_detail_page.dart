@@ -3,6 +3,7 @@ import 'package:gestionyobs/modules/article.dart';
 import 'package:gestionyobs/database/database_service.dart';
 import 'package:gestionyobs/modules/stock.dart';
 import 'package:gestionyobs/modules/vente.dart';
+import 'package:gestionyobs/service/ticket_service.dart';
 
 class VenteDetailPage extends StatefulWidget {
   final int id;
@@ -80,7 +81,28 @@ class _VenteDetailPageState extends State<VenteDetailPage> {
     final v = _vente;
 
     return Scaffold(
-      appBar: AppBar(title: Text(v == null ? 'Facture' : 'Facture ${v.code}')),
+      appBar: AppBar(
+        title: Text(v == null ? 'Facture' : 'Facture ${v.code}'),
+        actions: [
+          if (v != null) ...[
+            IconButton(
+              icon: const Icon(Icons.print),
+              tooltip: 'Imprimer le ticket',
+              onPressed: () => _imprimer(),
+            ),
+            PopupMenuButton<String>(
+              tooltip: 'Autres choix',
+              onSelected: (_) => _imprimer(avecDialogue: true),
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: 'choisir',
+                  child: Text("Choisir l'imprimante (fenêtre Windows)"),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
       body: _chargement
           ? const Center(child: CircularProgressIndicator())
           : _erreur != null
@@ -104,7 +126,16 @@ class _VenteDetailPageState extends State<VenteDetailPage> {
                     Text('Client : ${v.client}'),
                     Text('Vendeur : ${v.vendeur}'),
                     if (v.note != null) Text('Note : ${v.note}'),
-
+                    Text(
+                      v.nbImpressions == 0
+                          ? 'Pas encore imprimée'
+                          : 'Imprimée ${v.nbImpressions} fois '
+                                '(les suivantes portent la mention DUPLICATA)',
+                      style: const TextStyle(
+                        color: Colors.black54,
+                        fontSize: 12,
+                      ),
+                    ),
                     _titre('Articles'),
                     for (final l in v.lignes)
                       Card(
@@ -184,5 +215,21 @@ class _VenteDetailPageState extends State<VenteDetailPage> {
               ),
             ),
     );
+  }
+
+  Future<void> _imprimer({bool avecDialogue = false}) async {
+    try {
+      await TicketService.imprimerVente(widget.id, avecDialogue: avecDialogue);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Ticket envoyé à l'imprimante")),
+      );
+      _charger(); // pour mettre à jour le nombre d'impressions
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+    }
   }
 }

@@ -10,6 +10,8 @@ import 'package:gestionyobs/modules/tiers.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
 import 'package:gestionyobs/modules/vente.dart';
 import 'package:gestionyobs/page/vente_detail_page.dart';
+import 'package:gestionyobs/config_service.dart';
+import 'package:gestionyobs/service/ticket_service.dart';
 
 // Une ligne du panier
 class _LigneCaisse {
@@ -319,31 +321,65 @@ class _VenteFormPageState extends State<VenteFormPage> {
             .toList(),
       );
       if (!mounted) return;
+      final netVente = _net;
 
-      final suite = await showDialog<String>(
-        context: context,
-        barrierDismissible: false,
-        builder: (dialogContext) => AlertDialog(
-          title: const Text('Vente enregistrée'),
-          content: Text(
-            'Facture N° ${vente.code}\n'
-            'Net à payer : ${formaterPrix(_net)}'
-            '${vente.monnaie > 0 ? '\nMonnaie à rendre : ${formaterPrix(vente.monnaie)}' : ''}',
-            style: const TextStyle(fontSize: 16),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, 'nouvelle'),
-              child: const Text('Nouvelle vente'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, 'facture'),
-              child: const Text('Voir la facture'),
-            ),
-          ],
-        ),
-      );
+      // Impression automatique, selon les réglages de ce poste
+      String? message;
+      try {
+        final config = await ConfigService.lire();
+        if (config != null && config.impressionAuto) {
+          await TicketService.imprimerVente(vente.id);
+          message = "Ticket envoyé à l'imprimante";
+        }
+      } catch (e) {
+        message =
+            'Impression impossible : ${e.toString().replaceFirst('Exception: ', '')}';
+      }
       if (!mounted) return;
+
+      // La fenêtre revient après chaque impression manuelle
+      String? suite;
+      while (suite == null || suite == 'imprimer') {
+        suite = await showDialog<String>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Vente enregistrée'),
+            content: Text(
+              'Facture N° ${vente.code}\n'
+              'Net à payer : ${formaterPrix(netVente)}'
+              '${vente.monnaie > 0 ? '\nMonnaie à rendre : ${formaterPrix(vente.monnaie)}' : ''}'
+              '${message != null ? '\n\n$message' : ''}',
+              style: const TextStyle(fontSize: 16),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, 'nouvelle'),
+                child: const Text('Nouvelle vente'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, 'imprimer'),
+                child: const Text('Imprimer'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, 'facture'),
+                child: const Text('Voir la facture'),
+              ),
+            ],
+          ),
+        );
+        if (!mounted) return;
+
+        if (suite == 'imprimer') {
+          try {
+            await TicketService.imprimerVente(vente.id);
+            message = "Ticket envoyé à l'imprimante";
+          } catch (e) {
+            message =
+                'Impression impossible : ${e.toString().replaceFirst('Exception: ', '')}';
+          }
+        }
+      }
 
       if (suite == 'facture') {
         await Navigator.push(

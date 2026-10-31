@@ -47,7 +47,9 @@ class DatabaseService {
   // Version 12 : achats, lignes d'achat et paiements.
   // static const int _versionBase = 12;
   // Version 13 : ventes, lignes de vente (les paiements existent déjà).
-  static const int _versionBase = 13;
+  //static const int _versionBase = 13;
+  // Version 14 : paramètres de l'entreprise et compteur d'impressions.
+  static const int _versionBase = 14;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -86,6 +88,7 @@ class DatabaseService {
           await _migrerClasses(db);
           await _creerTablesAchats(db);
           await _creerTablesVentes(db);
+          await _creerTablesImpression(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -126,6 +129,9 @@ class DatabaseService {
           }
           if (ancienneVersion < 13) {
             await _creerTablesVentes(db);
+          }
+          if (ancienneVersion < 14) {
+            await _creerTablesImpression(db);
           }
         },
       ),
@@ -3051,8 +3057,9 @@ class DatabaseService {
 
     final entete = await db.rawQuery('''
       SELECT v.code, v.cree_le, v.note, v.statut, v.total_brut, v.total_remise,
-             v.total_tva, v.net_a_payer, v.monnaie_rendue,
-             t.nom AS client, u.nom_complet AS vendeur, ag.nom AS agence
+             v.total_tva, v.net_a_payer, v.monnaie_rendue, v.nb_impressions,
+             t.nom AS client, u.nom_complet AS vendeur, ag.nom AS agence,
+             ag.ville AS agence_ville, ag.telephone AS agence_telephone
       FROM ventes v
       INNER JOIN tiers t ON t.id = v.client_id
       INNER JOIN utilisateurs u ON u.id = v.utilisateur_id
@@ -3097,6 +3104,74 @@ class DatabaseService {
       monnaieRendue: e['monnaie_rendue'] as int,
       lignes: lignes.map(LigneVente.fromMap).toList(),
       paiements: paiements.map(PaiementVente.fromMap).toList(),
+      agenceVille: e['agence_ville'] as String?,
+      agenceTelephone: e['agence_telephone'] as String?,
+      nbImpressions: e['nb_impressions'] as int,
+    );
+  }
+
+  // ---------- Impression et paramètres de l'entreprise ----------
+
+  static Future<void> _creerTablesImpression(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS parametres (
+        cle TEXT PRIMARY KEY,
+        valeur TEXT NOT NULL
+      )
+    ''');
+
+    if (!await _colonneExiste(db, 'ventes', 'nb_impressions')) {
+      await db.execute(
+        'ALTER TABLE ventes ADD COLUMN nb_impressions INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+  }
+
+  // Lecture libre : tous les postes en ont besoin pour imprimer
+  static Future<InfosEntreprise> lireInfosEntreprise() async {
+    final lignes = await db.query('parametres');
+    final m = {
+      for (final l in lignes) l['cle'] as String: l['valeur'] as String,
+    };
+    return InfosEntreprise(
+      nom: m['entreprise_nom'] ?? '',
+      infos: m['entreprise_infos'] ?? '',
+      devise: m['entreprise_devise'] ?? '',
+      message: m['ticket_message'] ?? 'Merci de votre visite',
+    );
+  }
+
+  static Future<void> enregistrerInfosEntreprise(InfosEntreprise i) async {
+    Session.exiger('parametres.gerer');
+
+    final valeurs = {
+      'entreprise_nom': i.nom.trim(),
+      'entreprise_infos': i.infos.trim(),
+      'entreprise_devise': i.devise.trim(),
+      'ticket_message': i.message.trim(),
+    };
+
+    await db.transaction((txn) async {
+      for (final e in valeurs.entries) {
+        await txn.execute(
+          '''
+          INSERT INTO parametres (cle, valeur) VALUES (?, ?)
+          ON CONFLICT(cle) DO UPDATE SET valeur = excluded.valeur
+        ''',
+          [e.key, e.value],
+        );
+      }
+    });
+  }
+
+  // Compte une impression de plus (la 2e et les suivantes sont des duplicatas)
+  static Future<void> noterImpression(int venteId) async {
+    if (!Session.peut('ventes.voir') && !Session.peut('ventes.creer')) {
+      throw Exception('Action non autorisée');
+    }
+    await db.rawUpdate(
+      'UPDATE ventes SET nb_impressions = nb_impressions + 1 WHERE id = ?',
+      [venteId],
     );
   }
 }
