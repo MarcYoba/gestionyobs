@@ -17,6 +17,7 @@ import 'package:gestionyobs/association/association.dart';
 import 'package:gestionyobs/modules/postes_comptables.dart';
 import 'package:gestionyobs/modules/classe_article.dart';
 import 'package:gestionyobs/modules/achat.dart';
+import 'package:gestionyobs/modules/vente.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -44,7 +45,9 @@ class DatabaseService {
   // Version 11 : classes d'articles (remplacent les catégories en texte libre).
   //static const int _versionBase = 11;
   // Version 12 : achats, lignes d'achat et paiements.
-  static const int _versionBase = 12;
+  // static const int _versionBase = 12;
+  // Version 13 : ventes, lignes de vente (les paiements existent déjà).
+  static const int _versionBase = 13;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -82,6 +85,7 @@ class DatabaseService {
           await _creerTablesAssociations(db);
           await _migrerClasses(db);
           await _creerTablesAchats(db);
+          await _creerTablesVentes(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -119,6 +123,9 @@ class DatabaseService {
           }
           if (ancienneVersion < 12) {
             await _creerTablesAchats(db);
+          }
+          if (ancienneVersion < 13) {
+            await _creerTablesVentes(db);
           }
         },
       ),
@@ -2579,6 +2586,517 @@ class DatabaseService {
       totalTtc: e['total_ttc'] as int,
       lignes: lignes.map(LigneAchat.fromMap).toList(),
       paiements: paiements.map(PaiementAchat.fromMap).toList(),
+    );
+  }
+
+  // ---------- Ventes ----------
+
+  static Future<void> _creerTablesVentes(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS ventes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        agence_id INTEGER NOT NULL,
+        client_id INTEGER NOT NULL,
+        date_vente TEXT NOT NULL,
+        note TEXT,
+        total_brut INTEGER NOT NULL,
+        total_remise INTEGER NOT NULL DEFAULT 0,
+        total_tva INTEGER NOT NULL DEFAULT 0,
+        net_a_payer INTEGER NOT NULL,
+        monnaie_rendue INTEGER NOT NULL DEFAULT 0,
+        statut TEXT NOT NULL DEFAULT 'valide',
+        utilisateur_id INTEGER NOT NULL,
+        cree_le TEXT NOT NULL,
+        FOREIGN KEY (agence_id) REFERENCES agences(id),
+        FOREIGN KEY (client_id) REFERENCES tiers(id),
+        FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_ventes_agence ON ventes (agence_id, date_vente)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_ventes_client ON ventes (client_id)',
+    );
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS vente_lignes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        vente_id INTEGER NOT NULL,
+        article_id INTEGER NOT NULL,
+        code_article TEXT NOT NULL,
+        designation TEXT NOT NULL,
+        unite TEXT NOT NULL,
+        quantite REAL NOT NULL,
+        prix_catalogue INTEGER NOT NULL,
+        prix_unitaire INTEGER NOT NULL,
+        prix_achat INTEGER,
+        remise INTEGER NOT NULL DEFAULT 0,
+        taux_tva REAL NOT NULL DEFAULT 0,
+        montant_tva INTEGER NOT NULL DEFAULT 0,
+        total_brut INTEGER NOT NULL,
+        total_net INTEGER NOT NULL,
+        FOREIGN KEY (vente_id) REFERENCES ventes(id) ON DELETE CASCADE,
+        FOREIGN KEY (article_id) REFERENCES articles(id)
+      )
+    ''');
+  }
+
+  // Ce qu'un client doit déjà : ventes à crédit moins ce qu'il a payé
+  static Future<int> _encoursClient(
+    DatabaseExecutor executeur,
+    int clientId,
+  ) async {
+    final r = await executeur.rawQuery(
+      '''
+      SELECT COALESCE(SUM(v.net_a_payer - COALESCE(
+               (SELECT SUM(p.montant) FROM paiements p
+                WHERE p.type_document = 'vente' AND p.document_id = v.id), 0)), 0) AS encours
+      FROM ventes v
+      WHERE v.client_id = ? AND v.statut = 'valide'
+    ''',
+      [clientId],
+    );
+    return (r.first['encours'] as num).toInt();
+  }
+
+  // Les clients proposés à la caisse (le client comptant en premier)
+  static Future<List<Tiers>> clientsPourVente() async {
+    Session.exiger('ventes.creer');
+    final lignes = await db.query(
+      'tiers',
+      where: 'est_client = 1 AND actif = 1',
+      orderBy: 'systeme DESC, nom COLLATE NOCASE',
+    );
+    return lignes.map(Tiers.fromMap).toList();
+  }
+
+  static Future<SituationClient> situationClient(int clientId) async {
+    Session.exiger('ventes.creer');
+    final c = await db.query(
+      'tiers',
+      columns: ['systeme', 'plafond_credit'],
+      where: 'id = ?',
+      whereArgs: [clientId],
+      limit: 1,
+    );
+    if (c.isEmpty) throw Exception('Client introuvable');
+
+    return SituationClient(
+      plafond: c.first['plafond_credit'] as int,
+      encours: await _encoursClient(db, clientId),
+      systeme: c.first['systeme'] == 1,
+    );
+  }
+
+  // Les articles proposés à la caisse, avec le stock de l'agence courante
+  static Future<List<ArticleCaisse>> rechercherArticlesCaisse(
+    String recherche,
+  ) async {
+    Session.exiger('ventes.creer');
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final args = <Object>[agence.id];
+    var filtre = '';
+    final texte = recherche.trim();
+    if (texte.isNotEmpty) {
+      filtre = 'AND (a.code LIKE ? OR a.designation LIKE ? OR cl.nom LIKE ?)';
+      args.addAll(['%$texte%', '%$texte%', '%$texte%']);
+    }
+
+    final lignes = await db.rawQuery('''
+      SELECT a.id, a.code, a.designation, cl.nom AS categorie, a.unite,
+             a.prix_vente, COALESCE(s.quantite, 0) AS stock
+      FROM articles a
+      LEFT JOIN classes_articles cl ON cl.id = a.classe_id
+      LEFT JOIN stock s ON s.article_id = a.id AND s.agence_id = ?
+      WHERE a.actif = 1 $filtre
+      ORDER BY a.designation COLLATE NOCASE
+      LIMIT 50
+    ''', args);
+
+    return lignes.map(ArticleCaisse.fromMap).toList();
+  }
+
+  // Enregistre une vente entière : facture, stock, paiements. Tout ou rien.
+  static Future<VenteEnregistree> creerVente({
+    required int clientId,
+    String? note,
+    required List<LigneVenteSaisie> lignes,
+    required List<PaiementSaisi> paiements,
+  }) async {
+    Session.exiger('ventes.creer');
+
+    final agence = Session.agenceCourante;
+    final utilisateur = Session.utilisateurCourant;
+    if (agence == null || utilisateur == null) {
+      throw Exception('Aucune agence sélectionnée');
+    }
+    if (lignes.isEmpty) {
+      throw Exception('La vente doit contenir au moins un article');
+    }
+
+    final maintenant = DateTime.now();
+    String deux(int n) => n.toString().padLeft(2, '0');
+    final dateTexte =
+        '${maintenant.year}-${deux(maintenant.month)}-${deux(maintenant.day)}';
+
+    return db.transaction((txn) async {
+      // Le client
+      final c = await txn.query(
+        'tiers',
+        columns: ['systeme', 'est_client', 'actif', 'plafond_credit'],
+        where: 'id = ?',
+        whereArgs: [clientId],
+        limit: 1,
+      );
+      if (c.isEmpty) throw Exception('Client introuvable');
+      if (c.first['est_client'] != 1 || c.first['actif'] != 1) {
+        throw Exception('Ce client est indisponible');
+      }
+      final clientSysteme = c.first['systeme'] == 1;
+      final plafond = c.first['plafond_credit'] as int;
+
+      // Les lignes
+      var totalBrut = 0;
+      var totalRemise = 0;
+      final preparees = <Map<String, Object?>>[];
+      final demandees = <int, double>{}; // quantité totale demandée par article
+
+      for (final l in lignes) {
+        final q = _arrondir(l.quantite);
+        if (q <= 0)
+          throw Exception('Chaque quantité doit être supérieure à zéro');
+        if (l.prixUnitaire < 0)
+          throw Exception('Un prix ne peut pas être négatif');
+        if (l.remise < 0)
+          throw Exception('Une remise ne peut pas être négative');
+
+        final art = await txn.query(
+          'articles',
+          columns: [
+            'code',
+            'designation',
+            'unite',
+            'prix_vente',
+            'prix_achat',
+            'actif',
+          ],
+          where: 'id = ?',
+          whereArgs: [l.articleId],
+          limit: 1,
+        );
+        if (art.isEmpty) throw Exception('Article introuvable');
+        final designation = art.first['designation'] as String;
+        if (art.first['actif'] != 1)
+          throw Exception('« $designation » est désactivé');
+
+        // Le prix vient du catalogue, sauf droit particulier
+        final prixCatalogue = art.first['prix_vente'] as int;
+        if (l.prixUnitaire != prixCatalogue &&
+            !Session.peut('ventes.modifier_prix')) {
+          throw Exception('Le prix de vente ne peut pas être modifié');
+        }
+        if (l.remise > 0 && !Session.peut('ventes.remise')) {
+          throw Exception("Vous n'avez pas le droit d'accorder une remise");
+        }
+
+        final brut = (q * l.prixUnitaire).round();
+        if (l.remise > brut) {
+          throw Exception('La remise dépasse le montant de « $designation »');
+        }
+
+        totalBrut += brut;
+        totalRemise += l.remise;
+        demandees[l.articleId] = (demandees[l.articleId] ?? 0) + q;
+
+        preparees.add({
+          'article_id': l.articleId,
+          'code_article': art.first['code'],
+          'designation': designation,
+          'unite': art.first['unite'],
+          'quantite': q,
+          'prix_catalogue': prixCatalogue,
+          'prix_unitaire': l.prixUnitaire,
+          'prix_achat': art.first['prix_achat'],
+          'remise': l.remise,
+          'taux_tva': 0.0,
+          'montant_tva': 0,
+          'total_brut': brut,
+          'total_net': brut - l.remise,
+        });
+      }
+
+      final netAPayer = totalBrut - totalRemise;
+      if (netAPayer <= 0) {
+        throw Exception('Le net à payer doit être supérieur à zéro');
+      }
+
+      // Le stock, vérifié avant d'écrire quoi que ce soit
+      for (final e in demandees.entries) {
+        final s = await txn.query(
+          'stock',
+          columns: ['quantite'],
+          where: 'article_id = ? AND agence_id = ?',
+          whereArgs: [e.key, agence.id],
+          limit: 1,
+        );
+        final dispo = s.isEmpty ? 0.0 : (s.first['quantite'] as num).toDouble();
+        if (e.value > dispo) {
+          final nom = preparees.firstWhere(
+            (p) => p['article_id'] == e.key,
+          )['designation'];
+          throw Exception(
+            'Stock insuffisant pour « $nom » (disponible : ${formaterQuantite(dispo)})',
+          );
+        }
+      }
+
+      // Les paiements saisis
+      var totalSaisi = 0;
+      final modes = <int, Map<String, Object?>>{};
+      for (final p in paiements) {
+        if (p.montant <= 0) {
+          throw Exception('Chaque paiement doit être supérieur à zéro');
+        }
+        final m = await txn.query(
+          'modes_paiement',
+          columns: ['libelle', 'type', 'reference_obligatoire', 'actif'],
+          where: 'id = ?',
+          whereArgs: [p.modeId],
+          limit: 1,
+        );
+        if (m.isEmpty || m.first['actif'] != 1) {
+          throw Exception('Mode de paiement indisponible');
+        }
+        if (m.first['reference_obligatoire'] == 1 &&
+            (p.reference ?? '').trim().isEmpty) {
+          throw Exception(
+            'Une référence est obligatoire pour « ${m.first['libelle']} »',
+          );
+        }
+        modes[p.modeId] = m.first;
+        totalSaisi += p.montant;
+      }
+
+      final finaux = <Map<String, Object?>>[
+        for (final p in paiements)
+          {'mode': p.modeId, 'montant': p.montant, 'reference': p.reference},
+      ];
+
+      // La monnaie rendue : seulement sur des paiements en espèces
+      var monnaie = 0;
+      if (totalSaisi > netAPayer) {
+        var exces = totalSaisi - netAPayer;
+        final especes = finaux
+            .where((f) => modes[f['mode']]!['type'] == 'caisse')
+            .fold<int>(0, (somme, f) => somme + (f['montant'] as int));
+        if (exces > especes) {
+          throw Exception('Les paiements dépassent le net à payer');
+        }
+        monnaie = exces;
+
+        // On retire la monnaie des paiements en espèces, en partant du dernier
+        for (var i = finaux.length - 1; i >= 0 && exces > 0; i--) {
+          if (modes[finaux[i]['mode']]!['type'] != 'caisse') continue;
+          final montant = finaux[i]['montant'] as int;
+          final retrait = exces < montant ? exces : montant;
+          finaux[i]['montant'] = montant - retrait;
+          exces -= retrait;
+        }
+        finaux.removeWhere((f) => (f['montant'] as int) == 0);
+      }
+
+      final totalPaye = finaux.fold<int>(
+        0,
+        (somme, f) => somme + (f['montant'] as int),
+      );
+      final reste = netAPayer - totalPaye;
+
+      // Le crédit : client identifié et plafond respecté
+      if (reste > 0) {
+        if (clientSysteme) {
+          throw Exception(
+            'Une vente à crédit demande un client identifié '
+            '(pas « Client comptant »)',
+          );
+        }
+        final encours = await _encoursClient(txn, clientId);
+        if (encours + reste > plafond) {
+          throw Exception(
+            'Plafond de crédit dépassé : plafond ${formaterPrix(plafond)}, '
+            'déjà dû ${formaterPrix(encours)}, '
+            'reste de cette vente ${formaterPrix(reste)}',
+          );
+        }
+      }
+
+      // La vente
+      final code = await _prochainMatricule(txn, 'ventes');
+      final venteId = await txn.insert('ventes', {
+        'code': code,
+        'agence_id': agence.id,
+        'client_id': clientId,
+        'date_vente': dateTexte,
+        'note': _videEnNull(note),
+        'total_brut': totalBrut,
+        'total_remise': totalRemise,
+        'total_tva': 0,
+        'net_a_payer': netAPayer,
+        'monnaie_rendue': monnaie,
+        'statut': 'valide',
+        'utilisateur_id': utilisateur.id,
+        'cree_le': maintenant.toIso8601String(),
+      });
+
+      // Les lignes et la sortie de stock
+      for (final ligne in preparees) {
+        await txn.insert('vente_lignes', {...ligne, 'vente_id': venteId});
+
+        await _mouvementStock(
+          txn,
+          articleId: ligne['article_id'] as int,
+          agenceId: agence.id,
+          utilisateurId: utilisateur.id,
+          type: 'sortie',
+          quantite: ligne['quantite'] as double,
+          motif: 'Vente',
+          commentaire: 'Vente $code',
+          sourceType: 'vente',
+          sourceId: venteId,
+        );
+      }
+
+      // Les paiements
+      for (final f in finaux) {
+        await txn.insert('paiements', {
+          'type_document': 'vente',
+          'document_id': venteId,
+          'mode_id': f['mode'],
+          'montant': f['montant'],
+          'reference': _videEnNull(f['reference'] as String?),
+          'date_paiement': dateTexte,
+          'utilisateur_id': utilisateur.id,
+          'cree_le': maintenant.toIso8601String(),
+        });
+      }
+
+      return VenteEnregistree(id: venteId, code: code, monnaie: monnaie);
+    });
+  }
+
+  // Les ventes de l'agence courante. Sans le droit ventes.voir,
+  // on ne voit que ses propres ventes.
+  static Future<List<VenteResume>> listerVentes({
+    String recherche = '',
+    bool creditSeulement = false,
+  }) async {
+    final voirTout = Session.peut('ventes.voir');
+    if (!voirTout && !Session.peut('ventes.creer')) {
+      throw Exception('Action non autorisée');
+    }
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final args = <Object>[agence.id];
+    var filtre = '';
+    if (!voirTout) {
+      filtre += ' AND v.utilisateur_id = ?';
+      args.add(Session.utilisateurCourant!.id);
+    }
+    final texte = recherche.trim();
+    if (texte.isNotEmpty) {
+      filtre += ' AND (v.code LIKE ? OR t.nom LIKE ?)';
+      args.addAll(['%$texte%', '%$texte%']);
+    }
+
+    final lignes = await db.rawQuery('''
+      SELECT v.id, v.code, v.cree_le, v.net_a_payer, v.statut,
+             t.nom AS client, u.nom_complet AS vendeur,
+             COALESCE((SELECT SUM(p.montant) FROM paiements p
+                       WHERE p.type_document = 'vente' AND p.document_id = v.id), 0) AS paye
+      FROM ventes v
+      INNER JOIN tiers t ON t.id = v.client_id
+      INNER JOIN utilisateurs u ON u.id = v.utilisateur_id
+      WHERE v.agence_id = ? $filtre
+      ORDER BY v.id DESC
+      LIMIT 300
+    ''', args);
+
+    final liste = lignes.map(VenteResume.fromMap).toList();
+    return creditSeulement
+        ? liste.where((v) => v.statut == 'valide' && v.reste > 0).toList()
+        : liste;
+  }
+
+  static Future<VenteDetail> detailVente(int id) async {
+    final voirTout = Session.peut('ventes.voir');
+    if (!voirTout && !Session.peut('ventes.creer')) {
+      throw Exception('Action non autorisée');
+    }
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final args = <Object>[id, agence.id];
+    var filtre = '';
+    if (!voirTout) {
+      filtre = ' AND v.utilisateur_id = ?';
+      args.add(Session.utilisateurCourant!.id);
+    }
+
+    final entete = await db.rawQuery('''
+      SELECT v.code, v.cree_le, v.note, v.statut, v.total_brut, v.total_remise,
+             v.total_tva, v.net_a_payer, v.monnaie_rendue,
+             t.nom AS client, u.nom_complet AS vendeur, ag.nom AS agence
+      FROM ventes v
+      INNER JOIN tiers t ON t.id = v.client_id
+      INNER JOIN utilisateurs u ON u.id = v.utilisateur_id
+      INNER JOIN agences ag ON ag.id = v.agence_id
+      WHERE v.id = ? AND v.agence_id = ? $filtre
+    ''', args);
+    if (entete.isEmpty) throw Exception('Vente introuvable');
+
+    final lignes = await db.query(
+      'vente_lignes',
+      where: 'vente_id = ?',
+      whereArgs: [id],
+      orderBy: 'id',
+    );
+
+    final paiements = await db.rawQuery(
+      '''
+      SELECT p.montant, p.reference, p.date_paiement,
+             m.libelle AS mode, u.nom_complet AS utilisateur
+      FROM paiements p
+      INNER JOIN modes_paiement m ON m.id = p.mode_id
+      INNER JOIN utilisateurs u ON u.id = p.utilisateur_id
+      WHERE p.type_document = 'vente' AND p.document_id = ?
+      ORDER BY p.id
+    ''',
+      [id],
+    );
+
+    final e = entete.first;
+    return VenteDetail(
+      code: e['code'] as String,
+      date: DateTime.parse(e['cree_le'] as String),
+      agence: e['agence'] as String,
+      client: e['client'] as String,
+      vendeur: e['vendeur'] as String,
+      note: e['note'] as String?,
+      statut: e['statut'] as String,
+      totalBrut: e['total_brut'] as int,
+      totalRemise: e['total_remise'] as int,
+      totalTva: e['total_tva'] as int,
+      netAPayer: e['net_a_payer'] as int,
+      monnaieRendue: e['monnaie_rendue'] as int,
+      lignes: lignes.map(LigneVente.fromMap).toList(),
+      paiements: paiements.map(PaiementVente.fromMap).toList(),
     );
   }
 }

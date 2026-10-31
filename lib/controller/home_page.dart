@@ -14,6 +14,7 @@ import 'package:gestionyobs/page/plan_comptable_page.dart';
 import 'package:gestionyobs/page/associations_page.dart';
 import 'package:gestionyobs/page/classes_articles_page.dart';
 import 'package:gestionyobs/page/achats_page.dart';
+import 'package:gestionyobs/page/ventes_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -63,11 +64,12 @@ class HomePage extends StatelessWidget {
 
     // La liste complète des modules du logiciel
     final modules = <_Module>[
-      _bientot(
-        'Ventes',
-        'Caisse et historique des ventes',
-        Icons.point_of_sale,
-        ['ventes.creer', 'ventes.voir'],
+      _Module(
+        titre: 'Ventes',
+        description: 'Caisse, factures et crédits',
+        icone: Icons.point_of_sale,
+        permissions: ['ventes.creer', 'ventes.voir'],
+        ouvrir: (_) => const VentesPage(),
       ),
       _Module(
         titre: 'Articles',
