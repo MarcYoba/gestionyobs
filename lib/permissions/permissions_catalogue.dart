@@ -133,6 +133,12 @@ const List<PermissionDef> cataloguePermissions = [
     'Payer les fournisseurs',
     'Règlements',
   ),
+  PermissionDef(
+    'sauvegardes.gerer',
+    'Gérer les sauvegardes et restaurer la base de données',
+    'Administration',
+    adminSeulement: true,
+  ),
 ];
 
 /// Les droits donnés au départ aux rôles de base (d'après le tableau validé).

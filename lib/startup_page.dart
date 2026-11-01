@@ -6,6 +6,8 @@ import 'config_page.dart';
 import 'package:gestionyobs/database/database_service.dart';
 import 'package:gestionyobs/security/login_page.dart';
 import 'package:gestionyobs/controller/premier_admin_page.dart';
+import 'package:gestionyobs/service/backup_service.dart';
+import 'package:gestionyobs/app/messages_app.dart';
 
 class StartupPage extends StatefulWidget {
   const StartupPage({super.key});
@@ -37,8 +39,20 @@ class _StartupPageState extends State<StartupPage> {
     }
 
     try {
+      // Copie de sécurité avant une éventuelle mise à jour de la base
+      try {
+        await BackupService.avantMigration(config);
+      } catch (e) {
+        MessagesApp.afficher(
+          'Copie de sécurité avant mise à jour impossible : '
+          '${e.toString().replaceFirst('Exception: ', '')}',
+        );
+      }
       // 2. Ouvrir la base de données
       await DatabaseService.ouvrir(config);
+
+      // Les sauvegardes automatiques commencent dès que la base est ouverte
+      BackupService.demarrerPlanification();
 
       // 3. Premier utilisateur à créer ?
       final aDesUtilisateurs = await DatabaseService.aDesUtilisateurs();
@@ -47,11 +61,13 @@ class _StartupPageState extends State<StartupPage> {
       _aller(aDesUtilisateurs ? const LoginPage() : const PremierAdminPage());
     } catch (e) {
       // La base est introuvable ou illisible : retour à l'assistant
+      // La base est introuvable ou illisible : retour à l'assistant
       if (!mounted) return;
       _aller(
         ConfigPage(
-          // creation de la variable du  message d'erreur
-          messageErreur: "Impossible d'ouvrir la base de données : $e",
+          messageErreur:
+              "Impossible d'ouvrir la base de données : "
+              "${e.toString().replaceFirst('Exception: ', '')}",
         ),
       );
     }

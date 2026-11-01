@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 
 /// Les informations de configuration de l'application.
 /// Les informations de configuration de ce poste.
+/// Les informations de configuration de ce poste.
 class AppConfig {
   final String type;
   final String cheminBase;
@@ -12,9 +13,18 @@ class AppConfig {
 
   // Impression des tickets sur ce poste
   final int largeurPapier; // 58 ou 80 (mm)
-  final String? imprimante; // null = choisir à chaque impression
+  final String? imprimante; // null = imprimante par défaut de Windows
   final bool impressionAuto; // imprimer après chaque vente
   final bool reglagesImprimante; // utiliser le format du pilote Windows
+
+  // Sauvegardes de la base de données
+  final bool sauvegardeAuto;
+  final int sauvegardeIntervalleHeures;
+  final int sauvegardesConservees;
+  final String?
+  dossierSauvegarde2; // second emplacement (clé USB, autre disque)
+  final bool sauvegardeFermeture;
+  final String? derniereSauvegarde; // date au format ISO
 
   const AppConfig({
     required this.type,
@@ -24,22 +34,45 @@ class AppConfig {
     this.imprimante,
     this.impressionAuto = false,
     this.reglagesImprimante = false,
+    this.sauvegardeAuto = true,
+    this.sauvegardeIntervalleHeures = 12,
+    this.sauvegardesConservees = 60,
+    this.dossierSauvegarde2,
+    this.sauvegardeFermeture = true,
+    this.derniereSauvegarde,
   });
 
   AppConfig copyWith({
+    String? dossierSauvegarde,
     int? largeurPapier,
     String? imprimante,
     bool effacerImprimante = false,
     bool? impressionAuto,
     bool? reglagesImprimante,
+    bool? sauvegardeAuto,
+    int? sauvegardeIntervalleHeures,
+    int? sauvegardesConservees,
+    String? dossierSauvegarde2,
+    bool effacerDossier2 = false,
+    bool? sauvegardeFermeture,
+    String? derniereSauvegarde,
   }) => AppConfig(
     type: type,
     cheminBase: cheminBase,
-    dossierSauvegarde: dossierSauvegarde,
+    dossierSauvegarde: dossierSauvegarde ?? this.dossierSauvegarde,
     largeurPapier: largeurPapier ?? this.largeurPapier,
     imprimante: effacerImprimante ? null : (imprimante ?? this.imprimante),
     impressionAuto: impressionAuto ?? this.impressionAuto,
     reglagesImprimante: reglagesImprimante ?? this.reglagesImprimante,
+    sauvegardeAuto: sauvegardeAuto ?? this.sauvegardeAuto,
+    sauvegardeIntervalleHeures:
+        sauvegardeIntervalleHeures ?? this.sauvegardeIntervalleHeures,
+    sauvegardesConservees: sauvegardesConservees ?? this.sauvegardesConservees,
+    dossierSauvegarde2: effacerDossier2
+        ? null
+        : (dossierSauvegarde2 ?? this.dossierSauvegarde2),
+    sauvegardeFermeture: sauvegardeFermeture ?? this.sauvegardeFermeture,
+    derniereSauvegarde: derniereSauvegarde ?? this.derniereSauvegarde,
   );
 
   Map<String, dynamic> toJson() => {
@@ -50,6 +83,12 @@ class AppConfig {
     'imprimante': imprimante,
     'impressionAuto': impressionAuto,
     'reglagesImprimante': reglagesImprimante,
+    'sauvegardeAuto': sauvegardeAuto,
+    'sauvegardeIntervalleHeures': sauvegardeIntervalleHeures,
+    'sauvegardesConservees': sauvegardesConservees,
+    'dossierSauvegarde2': dossierSauvegarde2,
+    'sauvegardeFermeture': sauvegardeFermeture,
+    'derniereSauvegarde': derniereSauvegarde,
   };
 
   factory AppConfig.fromJson(Map<String, dynamic> json) => AppConfig(
@@ -60,6 +99,13 @@ class AppConfig {
     imprimante: json['imprimante'] as String?,
     impressionAuto: (json['impressionAuto'] as bool?) ?? false,
     reglagesImprimante: (json['reglagesImprimante'] as bool?) ?? false,
+    sauvegardeAuto: (json['sauvegardeAuto'] as bool?) ?? true,
+    sauvegardeIntervalleHeures:
+        (json['sauvegardeIntervalleHeures'] as int?) ?? 12,
+    sauvegardesConservees: (json['sauvegardesConservees'] as int?) ?? 60,
+    dossierSauvegarde2: json['dossierSauvegarde2'] as String?,
+    sauvegardeFermeture: (json['sauvegardeFermeture'] as bool?) ?? true,
+    derniereSauvegarde: json['derniereSauvegarde'] as String?,
   );
 }
 

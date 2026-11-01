@@ -179,20 +179,20 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                       const SizedBox(height: 12),
 
-                      // Bouton provisoire, à retirer plus tard
-                      TextButton(
-                        onPressed: () async {
-                          await ConfigService.supprimer();
-                          if (!context.mounted) return;
-                          Navigator.pushReplacement(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => const ConfigPage(),
-                            ),
-                          );
-                        },
-                        child: const Text('Reconfigurer (test)'),
-                      ),
+                      // Bouton provisoire, à retirer plus tard le stockage de la bd
+                      // TextButton(
+                      //   onPressed: () async {
+                      //     await ConfigService.supprimer();
+                      //     if (!context.mounted) return;
+                      //     Navigator.pushReplacement(
+                      //       context,
+                      //       MaterialPageRoute(
+                      //         builder: (_) => const ConfigPage(),
+                      //       ),
+                      //     );
+                      //   },
+                      //   child: const Text('Reconfigurer (test)'),
+                      // ),
                     ],
                   ),
                 ),
