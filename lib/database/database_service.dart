@@ -18,6 +18,7 @@ import 'package:gestionyobs/modules/postes_comptables.dart';
 import 'package:gestionyobs/modules/classe_article.dart';
 import 'package:gestionyobs/modules/achat.dart';
 import 'package:gestionyobs/modules/vente.dart';
+import 'package:gestionyobs/modules/reglement.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -47,7 +48,11 @@ class DatabaseService {
   // Version 12 : achats, lignes d'achat et paiements.
   // static const int _versionBase = 12;
   // Version 13 : ventes, lignes de vente (les paiements existent déjà).
-  static const int _versionBase = 13;
+  //static const int _versionBase = 13;
+  // Version 14 : paramètres de l'entreprise et compteur d'impressions.
+  //static const int _versionBase = 14;
+  // Version 15 : règlements (encaissement des créances, paiement des dettes).
+  static const int _versionBase = 15;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -86,6 +91,8 @@ class DatabaseService {
           await _migrerClasses(db);
           await _creerTablesAchats(db);
           await _creerTablesVentes(db);
+          await _creerTablesImpression(db);
+          await _creerTablesReglements(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -126,6 +133,12 @@ class DatabaseService {
           }
           if (ancienneVersion < 13) {
             await _creerTablesVentes(db);
+          }
+          if (ancienneVersion < 14) {
+            await _creerTablesImpression(db);
+          }
+          if (ancienneVersion < 15) {
+            await _creerTablesReglements(db);
           }
         },
       ),
@@ -3051,8 +3064,9 @@ class DatabaseService {
 
     final entete = await db.rawQuery('''
       SELECT v.code, v.cree_le, v.note, v.statut, v.total_brut, v.total_remise,
-             v.total_tva, v.net_a_payer, v.monnaie_rendue,
-             t.nom AS client, u.nom_complet AS vendeur, ag.nom AS agence
+             v.total_tva, v.net_a_payer, v.monnaie_rendue, v.nb_impressions,
+             t.nom AS client, u.nom_complet AS vendeur, ag.nom AS agence,
+             ag.ville AS agence_ville, ag.telephone AS agence_telephone
       FROM ventes v
       INNER JOIN tiers t ON t.id = v.client_id
       INNER JOIN utilisateurs u ON u.id = v.utilisateur_id
@@ -3097,6 +3111,527 @@ class DatabaseService {
       monnaieRendue: e['monnaie_rendue'] as int,
       lignes: lignes.map(LigneVente.fromMap).toList(),
       paiements: paiements.map(PaiementVente.fromMap).toList(),
+      agenceVille: e['agence_ville'] as String?,
+      agenceTelephone: e['agence_telephone'] as String?,
+      nbImpressions: e['nb_impressions'] as int,
+    );
+  }
+
+  // ---------- Impression et paramètres de l'entreprise ----------
+
+  static Future<void> _creerTablesImpression(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS parametres (
+        cle TEXT PRIMARY KEY,
+        valeur TEXT NOT NULL
+      )
+    ''');
+
+    if (!await _colonneExiste(db, 'ventes', 'nb_impressions')) {
+      await db.execute(
+        'ALTER TABLE ventes ADD COLUMN nb_impressions INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+  }
+
+  // Lecture libre : tous les postes en ont besoin pour imprimer
+  static Future<InfosEntreprise> lireInfosEntreprise() async {
+    final lignes = await db.query('parametres');
+    final m = {
+      for (final l in lignes) l['cle'] as String: l['valeur'] as String,
+    };
+    return InfosEntreprise(
+      nom: m['entreprise_nom'] ?? '',
+      infos: m['entreprise_infos'] ?? '',
+      devise: m['entreprise_devise'] ?? '',
+      message: m['ticket_message'] ?? 'Merci de votre visite',
+    );
+  }
+
+  static Future<void> enregistrerInfosEntreprise(InfosEntreprise i) async {
+    Session.exiger('parametres.gerer');
+
+    final valeurs = {
+      'entreprise_nom': i.nom.trim(),
+      'entreprise_infos': i.infos.trim(),
+      'entreprise_devise': i.devise.trim(),
+      'ticket_message': i.message.trim(),
+    };
+
+    await db.transaction((txn) async {
+      for (final e in valeurs.entries) {
+        await txn.execute(
+          '''
+          INSERT INTO parametres (cle, valeur) VALUES (?, ?)
+          ON CONFLICT(cle) DO UPDATE SET valeur = excluded.valeur
+        ''',
+          [e.key, e.value],
+        );
+      }
+    });
+  }
+
+  // Compte une impression de plus (la 2e et les suivantes sont des duplicatas)
+  static Future<void> noterImpression(int venteId) async {
+    if (!Session.peut('ventes.voir') && !Session.peut('ventes.creer')) {
+      throw Exception('Action non autorisée');
+    }
+    await db.rawUpdate(
+      'UPDATE ventes SET nb_impressions = nb_impressions + 1 WHERE id = ?',
+      [venteId],
+    );
+  }
+
+  // ---------- Règlements ----------
+
+  static Future<void> _creerTablesReglements(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS reglements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        type TEXT NOT NULL,
+        tiers_id INTEGER NOT NULL,
+        agence_id INTEGER NOT NULL,
+        date_reglement TEXT NOT NULL,
+        montant INTEGER NOT NULL,
+        note TEXT,
+        statut TEXT NOT NULL DEFAULT 'valide',
+        nb_impressions INTEGER NOT NULL DEFAULT 0,
+        utilisateur_id INTEGER NOT NULL,
+        cree_le TEXT NOT NULL,
+        FOREIGN KEY (tiers_id) REFERENCES tiers(id),
+        FOREIGN KEY (agence_id) REFERENCES agences(id),
+        FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_reglements_agence ON reglements (agence_id, type)',
+    );
+
+    // Un paiement sait de quel règlement il vient (null pour un paiement
+    // fait au moment de la vente ou de l'achat)
+    if (!await _colonneExiste(db, 'paiements', 'reglement_id')) {
+      await db.execute(
+        'ALTER TABLE paiements ADD COLUMN reglement_id INTEGER '
+        'REFERENCES reglements(id)',
+      );
+    }
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_paiements_reglement ON paiements (reglement_id)',
+    );
+  }
+
+  // Ce qui change entre les clients (ventes) et les fournisseurs (achats)
+  static const Map<String, Map<String, String>> _docsReglement = {
+    'client': {
+      'type': 'vente',
+      'table': 'ventes',
+      'tiers': 'client_id',
+      'total': 'net_a_payer',
+      'date': 'date_vente',
+    },
+    'fournisseur': {
+      'type': 'achat',
+      'table': 'achats',
+      'tiers': 'fournisseur_id',
+      'total': 'total_ttc',
+      'date': 'date_achat',
+    },
+  };
+
+  static Map<String, String> _doc(String type) {
+    final d = _docsReglement[type];
+    if (d == null) throw Exception('Type de règlement inconnu');
+    return d;
+  }
+
+  static String _droitReglement(String type) =>
+      type == 'client' ? 'reglements.clients' : 'reglements.fournisseurs';
+
+  static bool _peutVoirReglements(String type) =>
+      Session.peut('reglements.voir') || Session.peut(_droitReglement(type));
+
+  // Ce qu'un tiers doit encore dans cette agence
+  static Future<int> _soldeTiers(
+    DatabaseExecutor executeur,
+    String type,
+    int tiersId,
+    int agenceId,
+  ) async {
+    final d = _doc(type);
+    final r = await executeur.rawQuery(
+      '''
+      SELECT COALESCE(SUM(x.reste), 0) AS du FROM (
+        SELECT d.${d['total']} - COALESCE(
+                 (SELECT SUM(p.montant) FROM paiements p
+                  WHERE p.type_document = '${d['type']}' AND p.document_id = d.id), 0) AS reste
+        FROM ${d['table']} d
+        WHERE d.agence_id = ? AND d.${d['tiers']} = ? AND d.statut = 'valide'
+      ) x
+      WHERE x.reste > 0
+    ''',
+      [agenceId, tiersId],
+    );
+    return (r.first['du'] as num).toInt();
+  }
+
+  // Les clients (ou fournisseurs) qui ont un solde à régler dans l'agence
+  static Future<List<SoldeTiers>> listerSoldes(String type) async {
+    final d = _doc(type);
+    if (!_peutVoirReglements(type)) throw Exception('Action non autorisée');
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final lignes = await db.rawQuery(
+      '''
+      SELECT t.id, t.code, t.nom, t.telephone, COUNT(*) AS nb, SUM(x.reste) AS du
+      FROM (
+        SELECT d.${d['tiers']} AS tiers_id,
+               d.${d['total']} - COALESCE(
+                 (SELECT SUM(p.montant) FROM paiements p
+                  WHERE p.type_document = '${d['type']}' AND p.document_id = d.id), 0) AS reste
+        FROM ${d['table']} d
+        WHERE d.agence_id = ? AND d.statut = 'valide'
+      ) x
+      INNER JOIN tiers t ON t.id = x.tiers_id
+      WHERE x.reste > 0
+      GROUP BY t.id
+      ORDER BY du DESC
+    ''',
+      [agence.id],
+    );
+
+    return lignes.map(SoldeTiers.fromMap).toList();
+  }
+
+  // Les factures non soldées d'un tiers, les plus anciennes d'abord
+  static Future<List<DocumentDu>> documentsOuverts(
+    String type,
+    int tiersId,
+  ) async {
+    final d = _doc(type);
+    if (!_peutVoirReglements(type)) throw Exception('Action non autorisée');
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final lignes = await db.rawQuery(
+      '''
+      SELECT d.id, d.code, d.${d['date']} AS date, d.${d['total']} AS total,
+             COALESCE((SELECT SUM(p.montant) FROM paiements p
+                       WHERE p.type_document = '${d['type']}' AND p.document_id = d.id), 0) AS paye
+      FROM ${d['table']} d
+      WHERE d.agence_id = ? AND d.${d['tiers']} = ? AND d.statut = 'valide'
+      ORDER BY d.id
+    ''',
+      [agence.id, tiersId],
+    );
+
+    return lignes
+        .map(DocumentDu.fromMap)
+        .where((doc) => doc.reste > 0)
+        .toList();
+  }
+
+  // Enregistre un règlement : tout ou rien.
+  static Future<ReglementEnregistre> creerReglement({
+    required String type,
+    required int tiersId,
+    String? note,
+    required List<AllocationSaisie> allocations,
+    required List<PaiementSaisi> paiements,
+  }) async {
+    final d = _doc(type);
+    Session.exiger(_droitReglement(type));
+
+    final agence = Session.agenceCourante;
+    final utilisateur = Session.utilisateurCourant;
+    if (agence == null || utilisateur == null) {
+      throw Exception('Aucune agence sélectionnée');
+    }
+    if (allocations.isEmpty) {
+      throw Exception('Indiquez au moins une facture à régler');
+    }
+    if (paiements.isEmpty) throw Exception('Ajoutez au moins un paiement');
+
+    final maintenant = DateTime.now();
+    String deux(int n) => n.toString().padLeft(2, '0');
+    final dateTexte =
+        '${maintenant.year}-${deux(maintenant.month)}-${deux(maintenant.day)}';
+
+    return db.transaction((txn) async {
+      // Le tiers (un tiers désactivé peut toujours être réglé)
+      final t = await txn.query(
+        'tiers',
+        columns: ['est_client', 'est_fournisseur'],
+        where: 'id = ?',
+        whereArgs: [tiersId],
+        limit: 1,
+      );
+      if (t.isEmpty) throw Exception('Tiers introuvable');
+      final bonType = type == 'client'
+          ? t.first['est_client'] == 1
+          : t.first['est_fournisseur'] == 1;
+      if (!bonType)
+        throw Exception('Ce tiers ne correspond pas à ce type de règlement');
+
+      // Les factures concernées
+      final vues = <int>{};
+      var totalAlloue = 0;
+      final documents = <Map<String, Object?>>[];
+
+      for (final a in allocations) {
+        if (a.montant <= 0) {
+          throw Exception('Chaque montant réparti doit être supérieur à zéro');
+        }
+        if (!vues.add(a.documentId)) {
+          throw Exception(
+            'Une même facture ne peut apparaître qu\'une seule fois',
+          );
+        }
+
+        final r = await txn.rawQuery(
+          '''
+          SELECT d.code,
+                 d.${d['total']} - COALESCE(
+                   (SELECT SUM(p.montant) FROM paiements p
+                    WHERE p.type_document = '${d['type']}' AND p.document_id = d.id), 0) AS reste
+          FROM ${d['table']} d
+          WHERE d.id = ? AND d.agence_id = ? AND d.${d['tiers']} = ? AND d.statut = 'valide'
+        ''',
+          [a.documentId, agence.id, tiersId],
+        );
+        if (r.isEmpty) {
+          throw Exception(
+            'Facture introuvable pour ce tiers dans cette agence',
+          );
+        }
+
+        final reste = (r.first['reste'] as num).toInt();
+        if (a.montant > reste) {
+          throw Exception(
+            'Le montant dépasse le reste dû de la facture ${r.first['code']} '
+            '(reste ${formaterPrix(reste)})',
+          );
+        }
+
+        totalAlloue += a.montant;
+        documents.add({
+          'id': a.documentId,
+          'code': r.first['code'],
+          'montant': a.montant,
+        });
+      }
+
+      // Les paiements
+      var totalPaye = 0;
+      final modes = <Map<String, Object?>>[];
+      for (final p in paiements) {
+        if (p.montant <= 0) {
+          throw Exception('Chaque paiement doit être supérieur à zéro');
+        }
+        final m = await txn.query(
+          'modes_paiement',
+          columns: ['libelle', 'reference_obligatoire', 'actif'],
+          where: 'id = ?',
+          whereArgs: [p.modeId],
+          limit: 1,
+        );
+        if (m.isEmpty || m.first['actif'] != 1) {
+          throw Exception('Mode de paiement indisponible');
+        }
+        if (m.first['reference_obligatoire'] == 1 &&
+            (p.reference ?? '').trim().isEmpty) {
+          throw Exception(
+            'Une référence est obligatoire pour « ${m.first['libelle']} »',
+          );
+        }
+        totalPaye += p.montant;
+        modes.add({
+          'mode': p.modeId,
+          'reste': p.montant,
+          'reference': _videEnNull(p.reference),
+        });
+      }
+
+      if (totalPaye != totalAlloue) {
+        throw Exception(
+          'Le total des paiements (${formaterPrix(totalPaye)}) doit être égal '
+          'au total réparti sur les factures (${formaterPrix(totalAlloue)})',
+        );
+      }
+
+      // Le règlement
+      final code = await _prochainMatricule(txn, 'reglements');
+      final reglementId = await txn.insert('reglements', {
+        'code': code,
+        'type': type,
+        'tiers_id': tiersId,
+        'agence_id': agence.id,
+        'date_reglement': dateTexte,
+        'montant': totalAlloue,
+        'note': _videEnNull(note),
+        'statut': 'valide',
+        'utilisateur_id': utilisateur.id,
+        'cree_le': maintenant.toIso8601String(),
+      });
+
+      // La répartition : on prend les paiements dans l'ordre, facture par facture.
+      // Chaque ligne enregistrée relie une facture, un mode et un montant.
+      var m = 0;
+      for (final doc in documents) {
+        var aPlacer = doc['montant'] as int;
+        while (aPlacer > 0) {
+          final mode = modes[m];
+          final dispo = mode['reste'] as int;
+          if (dispo == 0) {
+            m++;
+            continue;
+          }
+          final part = aPlacer < dispo ? aPlacer : dispo;
+
+          await txn.insert('paiements', {
+            'type_document': d['type'],
+            'document_id': doc['id'],
+            'mode_id': mode['mode'],
+            'montant': part,
+            'reference': mode['reference'],
+            'date_paiement': dateTexte,
+            'utilisateur_id': utilisateur.id,
+            'cree_le': maintenant.toIso8601String(),
+            'reglement_id': reglementId,
+          });
+
+          mode['reste'] = dispo - part;
+          aPlacer -= part;
+        }
+      }
+
+      return ReglementEnregistre(id: reglementId, code: code);
+    });
+  }
+
+  // L'historique des règlements de l'agence courante
+  static Future<List<ReglementResume>> listerReglements(String type) async {
+    _doc(type);
+    if (!_peutVoirReglements(type)) throw Exception('Action non autorisée');
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final lignes = await db.rawQuery(
+      '''
+      SELECT r.id, r.code, r.date_reglement, r.montant,
+             t.nom AS tiers, u.nom_complet AS utilisateur
+      FROM reglements r
+      INNER JOIN tiers t ON t.id = r.tiers_id
+      INNER JOIN utilisateurs u ON u.id = r.utilisateur_id
+      WHERE r.agence_id = ? AND r.type = ?
+      ORDER BY r.id DESC
+      LIMIT 300
+    ''',
+      [agence.id, type],
+    );
+
+    return lignes.map(ReglementResume.fromMap).toList();
+  }
+
+  static Future<ReglementDetail> detailReglement(int id) async {
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final entete = await db.rawQuery(
+      '''
+      SELECT r.code, r.type, r.date_reglement, r.montant, r.note, r.nb_impressions,
+             r.tiers_id, t.nom AS tiers, u.nom_complet AS utilisateur,
+             ag.nom AS agence, ag.ville AS agence_ville, ag.telephone AS agence_telephone
+      FROM reglements r
+      INNER JOIN tiers t ON t.id = r.tiers_id
+      INNER JOIN utilisateurs u ON u.id = r.utilisateur_id
+      INNER JOIN agences ag ON ag.id = r.agence_id
+      WHERE r.id = ? AND r.agence_id = ?
+    ''',
+      [id, agence.id],
+    );
+    if (entete.isEmpty) throw Exception('Règlement introuvable');
+
+    final e = entete.first;
+    final type = e['type'] as String;
+    if (!_peutVoirReglements(type)) throw Exception('Action non autorisée');
+    final d = _doc(type);
+
+    final lignes = await db.rawQuery(
+      '''
+      SELECT d.code AS code, SUM(p.montant) AS montant
+      FROM paiements p
+      INNER JOIN ${d['table']} d ON d.id = p.document_id
+      WHERE p.reglement_id = ?
+      GROUP BY d.id
+      ORDER BY d.id
+    ''',
+      [id],
+    );
+
+    final modes = await db.rawQuery(
+      '''
+      SELECT m.libelle AS mode, SUM(p.montant) AS montant, p.reference AS reference
+      FROM paiements p
+      INNER JOIN modes_paiement m ON m.id = p.mode_id
+      WHERE p.reglement_id = ?
+      GROUP BY p.mode_id, p.reference
+      ORDER BY MIN(p.id)
+    ''',
+      [id],
+    );
+
+    return ReglementDetail(
+      code: e['code'] as String,
+      type: type,
+      date: DateTime.parse(e['date_reglement'] as String),
+      tiers: e['tiers'] as String,
+      utilisateur: e['utilisateur'] as String,
+      agence: e['agence'] as String,
+      agenceVille: e['agence_ville'] as String?,
+      agenceTelephone: e['agence_telephone'] as String?,
+      montant: e['montant'] as int,
+      note: e['note'] as String?,
+      nbImpressions: e['nb_impressions'] as int,
+      soldeRestant: await _soldeTiers(
+        db,
+        type,
+        e['tiers_id'] as int,
+        agence.id,
+      ),
+      lignes: lignes
+          .map(
+            (m) => LigneReglement(
+              documentCode: m['code'] as String,
+              montant: (m['montant'] as num).toInt(),
+            ),
+          )
+          .toList(),
+      modes: modes
+          .map(
+            (m) => PaiementReglement(
+              mode: m['mode'] as String,
+              montant: (m['montant'] as num).toInt(),
+              reference: m['reference'] as String?,
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  static Future<void> noterImpressionReglement(int id) async {
+    if (!Session.peut('reglements.voir') &&
+        !Session.peut('reglements.clients') &&
+        !Session.peut('reglements.fournisseurs')) {
+      throw Exception('Action non autorisée');
+    }
+    await db.rawUpdate(
+      'UPDATE reglements SET nb_impressions = nb_impressions + 1 WHERE id = ?',
+      [id],
     );
   }
 }

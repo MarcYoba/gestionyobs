@@ -25,6 +25,12 @@ const List<PermissionDef> cataloguePermissions = [
     'Ventes',
     adminSeulement: true,
   ),
+  PermissionDef(
+    'parametres.gerer',
+    "Modifier les informations de l'entreprise (en-tête des tickets)",
+    'Administration',
+    adminSeulement: true,
+  ),
   PermissionDef('stock.voir', 'Consulter le stock', 'Stock'),
   PermissionDef(
     'stock.modifier',
@@ -111,6 +117,21 @@ const List<PermissionDef> cataloguePermissions = [
     'achats.creer',
     'Enregistrer un achat et réceptionner la marchandise',
     'Achats',
+  ),
+  PermissionDef(
+    'reglements.voir',
+    'Consulter les créances, les dettes et les règlements',
+    'Règlements',
+  ),
+  PermissionDef(
+    'reglements.clients',
+    'Encaisser les règlements des clients',
+    'Règlements',
+  ),
+  PermissionDef(
+    'reglements.fournisseurs',
+    'Payer les fournisseurs',
+    'Règlements',
   ),
 ];
 

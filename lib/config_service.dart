@@ -1,32 +1,66 @@
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:path_provider/path_provider.dart';
 
 /// Les informations de configuration de l'application.
+/// Les informations de configuration de ce poste.
 class AppConfig {
   final String type;
   final String cheminBase;
   final String dossierSauvegarde;
 
+  // Impression des tickets sur ce poste
+  final int largeurPapier; // 58 ou 80 (mm)
+  final String? imprimante; // null = choisir à chaque impression
+  final bool impressionAuto; // imprimer après chaque vente
+  final bool reglagesImprimante; // utiliser le format du pilote Windows
+
   const AppConfig({
     required this.type,
     required this.cheminBase,
     required this.dossierSauvegarde,
+    this.largeurPapier = 80,
+    this.imprimante,
+    this.impressionAuto = false,
+    this.reglagesImprimante = false,
   });
 
-  // Transforme l'objet en données JSON (pour l'écrire dans le fichier)
-  Map<String, dynamic> toJson() => {
-        'type': type,
-        'cheminBase': cheminBase,
-        'dossierSauvegarde': dossierSauvegarde,
-      };
+  AppConfig copyWith({
+    int? largeurPapier,
+    String? imprimante,
+    bool effacerImprimante = false,
+    bool? impressionAuto,
+    bool? reglagesImprimante,
+  }) => AppConfig(
+    type: type,
+    cheminBase: cheminBase,
+    dossierSauvegarde: dossierSauvegarde,
+    largeurPapier: largeurPapier ?? this.largeurPapier,
+    imprimante: effacerImprimante ? null : (imprimante ?? this.imprimante),
+    impressionAuto: impressionAuto ?? this.impressionAuto,
+    reglagesImprimante: reglagesImprimante ?? this.reglagesImprimante,
+  );
 
-  // Transforme des données JSON en objet (pour lire le fichier)
+  Map<String, dynamic> toJson() => {
+    'type': type,
+    'cheminBase': cheminBase,
+    'dossierSauvegarde': dossierSauvegarde,
+    'largeurPapier': largeurPapier,
+    'imprimante': imprimante,
+    'impressionAuto': impressionAuto,
+    'reglagesImprimante': reglagesImprimante,
+  };
+
   factory AppConfig.fromJson(Map<String, dynamic> json) => AppConfig(
-        type: json['type'] as String,
-        cheminBase: json['cheminBase'] as String,
-        dossierSauvegarde: json['dossierSauvegarde'] as String,
-      );
+    type: json['type'] as String,
+    cheminBase: json['cheminBase'] as String,
+    dossierSauvegarde: json['dossierSauvegarde'] as String,
+    largeurPapier: (json['largeurPapier'] as int?) ?? 80,
+    imprimante: json['imprimante'] as String?,
+    impressionAuto: (json['impressionAuto'] as bool?) ?? false,
+    reglagesImprimante: (json['reglagesImprimante'] as bool?) ?? false,
+  );
 }
 
 /// Gère le fichier config.json : existe, lire, écrire, supprimer.

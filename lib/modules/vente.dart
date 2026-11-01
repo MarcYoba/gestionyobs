@@ -149,10 +149,13 @@ class LigneVente {
 typedef PaiementVente = PaiementAchat;
 
 /// Une vente avec ses lignes et ses paiements : la facture.
+/// Une vente avec ses lignes et ses paiements : la facture.
 class VenteDetail {
   final String code;
   final DateTime date;
   final String agence;
+  final String? agenceVille;
+  final String? agenceTelephone;
   final String client;
   final String vendeur;
   final String? note;
@@ -162,6 +165,7 @@ class VenteDetail {
   final int totalTva;
   final int netAPayer;
   final int monnaieRendue;
+  final int nbImpressions;
   final List<LigneVente> lignes;
   final List<PaiementVente> paiements;
 
@@ -169,6 +173,8 @@ class VenteDetail {
     required this.code,
     required this.date,
     required this.agence,
+    required this.agenceVille,
+    required this.agenceTelephone,
     required this.client,
     required this.vendeur,
     required this.note,
@@ -178,6 +184,7 @@ class VenteDetail {
     required this.totalTva,
     required this.netAPayer,
     required this.monnaieRendue,
+    required this.nbImpressions,
     required this.lignes,
     required this.paiements,
   });
@@ -189,3 +196,19 @@ class VenteDetail {
 
 /// 29/10/2026 14:05
 String dateHeureVente(DateTime d) => formaterDateHeure(d);
+
+/// Les informations de l'entreprise, pour l'en-tête et le pied des tickets.
+class InfosEntreprise {
+  final String nom;
+  final String
+  infos; // par exemple : numéro d'identification, registre de commerce
+  final String devise; // par exemple : F
+  final String message; // message de fin de ticket
+
+  const InfosEntreprise({
+    required this.nom,
+    required this.infos,
+    required this.devise,
+    required this.message,
+  });
+}
