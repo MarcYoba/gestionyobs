@@ -4,6 +4,9 @@ import 'package:gestionyobs/database/database_service.dart';
 import 'package:gestionyobs/modules/stock.dart';
 import 'package:gestionyobs/modules/vente.dart';
 import 'package:gestionyobs/service/ticket_service.dart';
+import 'package:gestionyobs/modules/annulation.dart';
+import 'package:gestionyobs/app/messages_app.dart';
+import 'package:gestionyobs/security/utilisateur.dart';
 
 class VenteDetailPage extends StatefulWidget {
   final int id;
@@ -18,6 +21,7 @@ class _VenteDetailPageState extends State<VenteDetailPage> {
   VenteDetail? _vente;
   bool _chargement = true;
   String? _erreur;
+  InfoAnnulation? _annulation;
 
   @override
   void initState() {
@@ -28,9 +32,13 @@ class _VenteDetailPageState extends State<VenteDetailPage> {
   Future<void> _charger() async {
     try {
       final detail = await DatabaseService.detailVente(widget.id);
+      final info = detail.statut == 'annule'
+          ? await DatabaseService.infoAnnulation('vente', widget.id)
+          : null;
       if (!mounted) return;
       setState(() {
         _vente = detail;
+        _annulation = info;
         _chargement = false;
       });
     } catch (e) {
@@ -122,6 +130,8 @@ class _VenteDetailPageState extends State<VenteDetailPage> {
                         fontWeight: FontWeight.bold,
                       ),
                     ),
+                    if (_annulation != null)
+                      BandeauAnnulation(info: _annulation!),
                     Text('${formaterDateHeure(v.date)} · Agence ${v.agence}'),
                     Text('Client : ${v.client}'),
                     Text('Vendeur : ${v.vendeur}'),
@@ -192,7 +202,9 @@ class _VenteDetailPageState extends State<VenteDetailPage> {
                     _ligneMontant('Reçu', v.recu),
                     if (v.monnaieRendue > 0)
                       _ligneMontant('Monnaie rendue', v.monnaieRendue),
-                    if (v.reste > 0)
+                    if (v.statut != 'valide')
+                      const SizedBox.shrink()
+                    else if (v.reste > 0)
                       _ligneMontant(
                         'Reste à payer (crédit)',
                         v.reste,
@@ -210,6 +222,18 @@ class _VenteDetailPageState extends State<VenteDetailPage> {
                           ),
                         ),
                       ),
+                    if (v.statut == 'valide' &&
+                        Session.peut('ventes.annuler')) ...[
+                      const SizedBox(height: 24),
+                      OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.red,
+                        ),
+                        onPressed: _annuler,
+                        icon: const Icon(Icons.cancel_outlined),
+                        label: const Text('Annuler cette vente'),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -230,6 +254,35 @@ class _VenteDetailPageState extends State<VenteDetailPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
       );
+    }
+  }
+
+  Future<void> _annuler() async {
+    final v = _vente!;
+    final motif = await showDialog<String>(
+      context: context,
+      builder: (_) => MotifAnnulationDialog(
+        titre: 'Annuler la vente ${v.code} ?',
+        avertissement:
+            'Les articles retournent en stock et le crédit éventuel du client '
+            'disparaît. Paiements reçus à rembourser : ${formaterPrix(v.paye)}. '
+            'Cette action est définitive.',
+      ),
+    );
+    if (motif == null || !mounted) return;
+
+    try {
+      final rembourse = await DatabaseService.annulerVente(widget.id, motif);
+      if (!mounted) return;
+      MessagesApp.afficher(
+        rembourse > 0
+            ? 'Vente annulée. À rembourser au client : ${formaterPrix(rembourse)}'
+            : 'Vente annulée',
+      );
+      await _charger();
+    } catch (e) {
+      if (!mounted) return;
+      MessagesApp.afficher(e.toString().replaceFirst('Exception: ', ''));
     }
   }
 }

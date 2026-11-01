@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:gestionyobs/modules/achat.dart';
 import 'package:gestionyobs/modules/article.dart';
 import 'package:gestionyobs/database/database_service.dart';
+import 'package:gestionyobs/modules/annulation.dart';
+import 'package:gestionyobs/app/messages_app.dart';
+import 'package:gestionyobs/security/utilisateur.dart';
 
 class AchatDetailPage extends StatefulWidget {
   final int id;
@@ -16,6 +19,7 @@ class _AchatDetailPageState extends State<AchatDetailPage> {
   AchatDetail? _achat;
   bool _chargement = true;
   String? _erreur;
+  InfoAnnulation? _annulation;
 
   @override
   void initState() {
@@ -26,9 +30,13 @@ class _AchatDetailPageState extends State<AchatDetailPage> {
   Future<void> _charger() async {
     try {
       final detail = await DatabaseService.detailAchat(widget.id);
+      final info = detail.statut == 'annule'
+          ? await DatabaseService.infoAnnulation('achat', widget.id)
+          : null;
       if (!mounted) return;
       setState(() {
         _achat = detail;
+        _annulation = info;
         _chargement = false;
       });
     } catch (e) {
@@ -77,6 +85,8 @@ class _AchatDetailPageState extends State<AchatDetailPage> {
                         fontWeight: FontWeight.bold,
                       ),
                     ),
+                    if (_annulation != null)
+                      BandeauAnnulation(info: _annulation!),
                     Text(
                       [
                         formaterDate(a.date),
@@ -141,21 +151,64 @@ class _AchatDetailPageState extends State<AchatDetailPage> {
                       ),
                     ),
                     Text('Payé : ${formaterPrix(a.paye)}'),
-                    Text(
-                      a.reste > 0
-                          ? 'Reste à payer : ${formaterPrix(a.reste)}'
-                          : 'Achat entièrement payé',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        color: a.reste > 0
-                            ? Colors.orange.shade800
-                            : Colors.green.shade800,
+                    if (a.statut == 'valide')
+                      Text(
+                        a.reste > 0
+                            ? 'Reste à payer : ${formaterPrix(a.reste)}'
+                            : 'Achat entièrement payé',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: a.reste > 0
+                              ? Colors.orange.shade800
+                              : Colors.green.shade800,
+                        ),
                       ),
-                    ),
+                    if (a.statut == 'valide' &&
+                        Session.peut('achats.annuler')) ...[
+                      const SizedBox(height: 24),
+                      OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.red,
+                        ),
+                        onPressed: _annuler,
+                        icon: const Icon(Icons.cancel_outlined),
+                        label: const Text("Annuler cet achat"),
+                      ),
+                    ],
                   ],
                 ),
               ),
             ),
     );
+  }
+
+  Future<void> _annuler() async {
+    final a = _achat!;
+    final motif = await showDialog<String>(
+      context: context,
+      builder: (_) => MotifAnnulationDialog(
+        titre: "Annuler l'achat ${a.code} ?",
+        avertissement:
+            "Les articles reçus sont retirés du stock (refusé si une partie a "
+            "déjà été vendue) et la dette fournisseur disparaît. "
+            "Paiements à récupérer : ${formaterPrix(a.paye)}. "
+            "Cette action est définitive.",
+      ),
+    );
+    if (motif == null || !mounted) return;
+
+    try {
+      final recupere = await DatabaseService.annulerAchat(widget.id, motif);
+      if (!mounted) return;
+      MessagesApp.afficher(
+        recupere > 0
+            ? 'Achat annulé. À récupérer auprès du fournisseur : ${formaterPrix(recupere)}'
+            : 'Achat annulé',
+      );
+      await _charger();
+    } catch (e) {
+      if (!mounted) return;
+      MessagesApp.afficher(e.toString().replaceFirst('Exception: ', ''));
+    }
   }
 }
