@@ -19,6 +19,7 @@ import 'package:gestionyobs/modules/classe_article.dart';
 import 'package:gestionyobs/modules/achat.dart';
 import 'package:gestionyobs/modules/vente.dart';
 import 'package:gestionyobs/modules/reglement.dart';
+import 'package:gestionyobs/modules/annulation.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -52,7 +53,9 @@ class DatabaseService {
   // Version 14 : paramètres de l'entreprise et compteur d'impressions.
   //static const int _versionBase = 14;
   // Version 15 : règlements (encaissement des créances, paiement des dettes).
-  static const int _versionBase = 15;
+  //static const int _versionBase = 15;
+  // Version 16 : annulation des ventes et des achats.
+  static const int _versionBase = 16;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -93,6 +96,7 @@ class DatabaseService {
           await _creerTablesVentes(db);
           await _creerTablesImpression(db);
           await _creerTablesReglements(db);
+          await _migrerAnnulations(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -139,6 +143,9 @@ class DatabaseService {
           }
           if (ancienneVersion < 15) {
             await _creerTablesReglements(db);
+          }
+          if (ancienneVersion < 16) {
+            await _migrerAnnulations(db);
           }
         },
       ),
@@ -1031,6 +1038,7 @@ class DatabaseService {
     String? commentaire,
     String? sourceType, // par exemple 'achat'
     int? sourceId,
+    bool ignorerInactif = false, // vrai pour les annulations
   }) async {
     final q = _arrondir(quantite);
 
@@ -1042,7 +1050,7 @@ class DatabaseService {
       limit: 1,
     );
     if (article.isEmpty) throw Exception('Article introuvable');
-    if (article.first['actif'] != 1) {
+    if (article.first['actif'] != 1 && !ignorerInactif) {
       throw Exception('Cet article est désactivé');
     }
 
@@ -3694,5 +3702,274 @@ class DatabaseService {
     } finally {
       await lecture?.close();
     }
+  }
+
+  // ---------- Annulations ----------
+
+  static Future<void> _migrerAnnulations(Database db) async {
+    for (final table in ['ventes', 'achats']) {
+      const colonnes = {
+        'annule_le': 'TEXT',
+        'annule_par': 'INTEGER',
+        'motif_annulation': 'TEXT',
+      };
+      for (final c in colonnes.entries) {
+        if (!await _colonneExiste(db, table, c.key)) {
+          await db.execute('ALTER TABLE $table ADD COLUMN ${c.key} ${c.value}');
+        }
+      }
+    }
+  }
+
+  // Qui a annulé ce document ? Null s'il n'est pas annulé.
+  static Future<InfoAnnulation?> infoAnnulation(String document, int id) async {
+    final table = switch (document) {
+      'vente' => 'ventes',
+      'achat' => 'achats',
+      _ => throw Exception('Document inconnu'),
+    };
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    final r = await db.rawQuery(
+      '''
+      SELECT d.annule_le, d.motif_annulation, u.nom_complet AS utilisateur
+      FROM $table d
+      INNER JOIN utilisateurs u ON u.id = d.annule_par
+      WHERE d.id = ? AND d.agence_id = ? AND d.statut = 'annule'
+    ''',
+      [id, agence.id],
+    );
+    if (r.isEmpty) return null;
+
+    return InfoAnnulation(
+      date: DateTime.parse(r.first['annule_le'] as String),
+      utilisateur: r.first['utilisateur'] as String,
+      motif: r.first['motif_annulation'] as String,
+    );
+  }
+
+  // Une ligne de contre-passation pour chaque paiement du document.
+  // Retourne le total à rembourser.
+  static Future<int> _contrepasser(
+    Transaction txn, {
+    required String typeSource, // 'vente' ou 'achat'
+    required int documentId,
+    required int utilisateurId,
+    required String dateTexte,
+    required DateTime maintenant,
+  }) async {
+    final anciens = await txn.query(
+      'paiements',
+      where: 'type_document = ? AND document_id = ?',
+      whereArgs: [typeSource, documentId],
+      orderBy: 'id',
+    );
+
+    var total = 0;
+    for (final p in anciens) {
+      final montant = p['montant'] as int;
+      total += montant;
+      await txn.insert('paiements', {
+        'type_document': 'annulation_$typeSource',
+        'document_id': documentId,
+        'mode_id': p['mode_id'],
+        'montant': montant,
+        'reference': p['reference'],
+        'date_paiement': dateTexte,
+        'utilisateur_id': utilisateurId,
+        'cree_le': maintenant.toIso8601String(),
+      });
+    }
+    return total;
+  }
+
+  // Annule une vente : stock remis, paiements contre-passés.
+  // Retourne le montant à rembourser au client.
+  static Future<int> annulerVente(int venteId, String motif) async {
+    Session.exiger('ventes.annuler');
+
+    final agence = Session.agenceCourante;
+    final utilisateur = Session.utilisateurCourant;
+    if (agence == null || utilisateur == null) {
+      throw Exception('Aucune agence sélectionnée');
+    }
+    final raison = motif.trim();
+    if (raison.length < 3) throw Exception("Indiquez le motif de l'annulation");
+
+    final maintenant = DateTime.now();
+    String deux(int n) => n.toString().padLeft(2, '0');
+    final dateTexte =
+        '${maintenant.year}-${deux(maintenant.month)}-${deux(maintenant.day)}';
+
+    return db.transaction((txn) async {
+      final v = await txn.query(
+        'ventes',
+        columns: ['code', 'statut'],
+        where: 'id = ? AND agence_id = ?',
+        whereArgs: [venteId, agence.id],
+        limit: 1,
+      );
+      if (v.isEmpty) throw Exception('Vente introuvable');
+      if (v.first['statut'] != 'valide') {
+        throw Exception('Cette vente est déjà annulée');
+      }
+      final code = v.first['code'] as String;
+
+      final lignes = await txn.query(
+        'vente_lignes',
+        columns: ['article_id', 'quantite'],
+        where: 'vente_id = ?',
+        whereArgs: [venteId],
+      );
+      for (final l in lignes) {
+        await _mouvementStock(
+          txn,
+          articleId: l['article_id'] as int,
+          agenceId: agence.id,
+          utilisateurId: utilisateur.id,
+          type: 'entree',
+          quantite: (l['quantite'] as num).toDouble(),
+          motif: 'Annulation vente',
+          commentaire: 'Annulation de la vente $code',
+          sourceType: 'annulation_vente',
+          sourceId: venteId,
+          ignorerInactif: true,
+        );
+      }
+
+      final rembourse = await _contrepasser(
+        txn,
+        typeSource: 'vente',
+        documentId: venteId,
+        utilisateurId: utilisateur.id,
+        dateTexte: dateTexte,
+        maintenant: maintenant,
+      );
+
+      final n = await txn.update(
+        'ventes',
+        {
+          'statut': 'annule',
+          'annule_le': maintenant.toIso8601String(),
+          'annule_par': utilisateur.id,
+          'motif_annulation': raison,
+        },
+        where: "id = ? AND statut = 'valide'",
+        whereArgs: [venteId],
+      );
+      if (n != 1) throw Exception('Cette vente est déjà annulée');
+
+      return rembourse;
+    });
+  }
+
+  // Annule un achat : stock retiré (si la marchandise est encore là),
+  // paiements contre-passés. Retourne le montant à récupérer du fournisseur.
+  static Future<int> annulerAchat(int achatId, String motif) async {
+    Session.exiger('achats.annuler');
+
+    final agence = Session.agenceCourante;
+    final utilisateur = Session.utilisateurCourant;
+    if (agence == null || utilisateur == null) {
+      throw Exception('Aucune agence sélectionnée');
+    }
+    final raison = motif.trim();
+    if (raison.length < 3) throw Exception("Indiquez le motif de l'annulation");
+
+    final maintenant = DateTime.now();
+    String deux(int n) => n.toString().padLeft(2, '0');
+    final dateTexte =
+        '${maintenant.year}-${deux(maintenant.month)}-${deux(maintenant.day)}';
+
+    return db.transaction((txn) async {
+      final a = await txn.query(
+        'achats',
+        columns: ['code', 'statut'],
+        where: 'id = ? AND agence_id = ?',
+        whereArgs: [achatId, agence.id],
+        limit: 1,
+      );
+      if (a.isEmpty) throw Exception('Achat introuvable');
+      if (a.first['statut'] != 'valide') {
+        throw Exception('Cet achat est déjà annulé');
+      }
+      final code = a.first['code'] as String;
+
+      final lignes = await txn.query(
+        'achat_lignes',
+        columns: ['article_id', 'designation', 'quantite'],
+        where: 'achat_id = ?',
+        whereArgs: [achatId],
+      );
+
+      // Quantité à retirer par article, et le stock est-il encore là ?
+      final aRetirer = <int, double>{};
+      final noms = <int, String>{};
+      for (final l in lignes) {
+        final id = l['article_id'] as int;
+        aRetirer[id] = _arrondir(
+          (aRetirer[id] ?? 0) + (l['quantite'] as num).toDouble(),
+        );
+        noms[id] = l['designation'] as String;
+      }
+      for (final e in aRetirer.entries) {
+        final s = await txn.query(
+          'stock',
+          columns: ['quantite'],
+          where: 'article_id = ? AND agence_id = ?',
+          whereArgs: [e.key, agence.id],
+          limit: 1,
+        );
+        final dispo = s.isEmpty ? 0.0 : (s.first['quantite'] as num).toDouble();
+        if (e.value > dispo) {
+          throw Exception(
+            "Annulation impossible : « ${noms[e.key]} » n'a plus assez de stock "
+            '(reçu ${formaterQuantite(e.value)}, disponible ${formaterQuantite(dispo)}). '
+            'Une partie de la marchandise a déjà été vendue ou sortie.',
+          );
+        }
+      }
+
+      for (final e in aRetirer.entries) {
+        await _mouvementStock(
+          txn,
+          articleId: e.key,
+          agenceId: agence.id,
+          utilisateurId: utilisateur.id,
+          type: 'sortie',
+          quantite: e.value,
+          motif: 'Annulation achat',
+          commentaire: "Annulation de l'achat $code",
+          sourceType: 'annulation_achat',
+          sourceId: achatId,
+          ignorerInactif: true,
+        );
+      }
+
+      final recupere = await _contrepasser(
+        txn,
+        typeSource: 'achat',
+        documentId: achatId,
+        utilisateurId: utilisateur.id,
+        dateTexte: dateTexte,
+        maintenant: maintenant,
+      );
+
+      final n = await txn.update(
+        'achats',
+        {
+          'statut': 'annule',
+          'annule_le': maintenant.toIso8601String(),
+          'annule_par': utilisateur.id,
+          'motif_annulation': raison,
+        },
+        where: "id = ? AND statut = 'valide'",
+        whereArgs: [achatId],
+      );
+      if (n != 1) throw Exception('Cet achat est déjà annulé');
+
+      return recupere;
+    });
   }
 }

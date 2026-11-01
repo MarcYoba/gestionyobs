@@ -184,14 +184,21 @@ class _VentesPageState extends State<VentesPage> {
                                     ),
                                   ),
                                   Text(
-                                    v.reste > 0
-                                        ? 'Crédit : ${formaterPrix(v.reste)}'
-                                        : 'Payée',
+                                    v.statut == 'annule'
+                                        ? 'Annulée'
+                                        : (v.reste > 0
+                                              ? 'Crédit : ${formaterPrix(v.reste)}'
+                                              : 'Payée'),
                                     style: TextStyle(
                                       fontSize: 12,
-                                      color: v.reste > 0
-                                          ? Colors.orange.shade800
-                                          : Colors.green.shade800,
+                                      fontWeight: v.statut == 'annule'
+                                          ? FontWeight.bold
+                                          : FontWeight.normal,
+                                      color: v.statut == 'annule'
+                                          ? Colors.red
+                                          : (v.reste > 0
+                                                ? Colors.orange.shade800
+                                                : Colors.green.shade800),
                                     ),
                                   ),
                                 ],

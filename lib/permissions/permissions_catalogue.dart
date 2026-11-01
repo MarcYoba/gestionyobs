@@ -47,6 +47,7 @@ const List<PermissionDef> cataloguePermissions = [
     "Voir les prix d'achat et les marges",
     'Achats',
   ),
+  PermissionDef('achats.annuler', 'Annuler un achat', 'Achats'),
   PermissionDef('achats.voir', 'Voir les achats et les fournisseurs', 'Achats'),
   PermissionDef(
     'rapports.voir',
