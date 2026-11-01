@@ -140,6 +140,12 @@ const List<PermissionDef> cataloguePermissions = [
     'Administration',
     adminSeulement: true,
   ),
+  PermissionDef(
+    'licence.gerer',
+    'Voir et activer la licence du logiciel',
+    'Administration',
+    adminSeulement: true,
+  ),
 ];
 
 /// Les droits donnés au départ aux rôles de base (d'après le tableau validé).

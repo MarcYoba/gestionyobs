@@ -19,6 +19,8 @@ import 'package:gestionyobs/page/impression_page.dart';
 import 'package:gestionyobs/page/reglements_page.dart';
 import 'package:gestionyobs/service/backup_service.dart';
 import 'package:gestionyobs/page/sauvegardes_page.dart';
+import 'package:gestionyobs/page/licence_page.dart';
+import 'package:gestionyobs/service/licence_service.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -185,6 +187,13 @@ class HomePage extends StatelessWidget {
         permissions: ['comptabilite.voir', 'comptabilite.gerer'],
         ouvrir: (_) => const AssociationsPage(),
       ),
+      _Module(
+        titre: 'Licence',
+        description: 'Activation du logiciel',
+        icone: Icons.verified_user,
+        permissions: ['licence.gerer'],
+        ouvrir: (_) => const LicencePage(),
+      ),
     ];
 
     // On ne garde que ceux que l'utilisateur a le droit d'utiliser
@@ -291,6 +300,35 @@ class HomePage extends StatelessWidget {
                       );
                     },
                   ),
+                const SizedBox(height: 24),
+                FutureBuilder<EtatLicence>(
+                  future: LicenceService.verifier(),
+                  builder: (context, snapshot) {
+                    final l = snapshot.data;
+                    if (l == null ||
+                        l.licencie ||
+                        !l.autorise ||
+                        l.joursRestants > 10) {
+                      return const SizedBox.shrink();
+                    }
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 16),
+                      child: Card(
+                        color: Colors.orange.shade50,
+                        child: ListTile(
+                          leading: Icon(
+                            Icons.timer,
+                            color: Colors.orange.shade800,
+                          ),
+                          title: Text(l.message),
+                          subtitle: const Text(
+                            "Contactez votre fournisseur avec le code du poste (menu Licence).",
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ],
             ),
           ),

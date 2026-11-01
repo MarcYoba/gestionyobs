@@ -43,6 +43,7 @@ dependencies:
   xml: ^7.1.0
   pdf: ^3.13.1
   printing: ^5.15.1
+  cryptography: ^2.7.0
 
 dev_dependencies:
   flutter_test:
