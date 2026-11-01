@@ -118,6 +118,21 @@ const List<PermissionDef> cataloguePermissions = [
     'Enregistrer un achat et réceptionner la marchandise',
     'Achats',
   ),
+  PermissionDef(
+    'reglements.voir',
+    'Consulter les créances, les dettes et les règlements',
+    'Règlements',
+  ),
+  PermissionDef(
+    'reglements.clients',
+    'Encaisser les règlements des clients',
+    'Règlements',
+  ),
+  PermissionDef(
+    'reglements.fournisseurs',
+    'Payer les fournisseurs',
+    'Règlements',
+  ),
 ];
 
 /// Les droits donnés au départ aux rôles de base (d'après le tableau validé).

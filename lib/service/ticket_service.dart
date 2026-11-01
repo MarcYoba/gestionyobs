@@ -9,6 +9,7 @@ import 'package:gestionyobs/config_service.dart';
 import 'package:gestionyobs/database/database_service.dart';
 import 'package:gestionyobs/modules/stock.dart';
 import 'package:gestionyobs/modules/vente.dart';
+import 'package:gestionyobs/modules/reglement.dart';
 
 /// Fabrique et imprime les tickets de caisse (58 mm ou 80 mm).
 class TicketService {
@@ -312,5 +313,159 @@ class TicketService {
       numeroImpression: 1,
     );
     await _envoyer(octets, config, 'Ticket de test');
+  }
+
+  // Ce poste imprime-t-il automatiquement ?
+  static Future<bool> impressionAutoActive() async {
+    final config = await ConfigService.lire();
+    return config?.impressionAuto ?? false;
+  }
+
+  static Future<Uint8List> genererRecuReglement({
+    required ReglementDetail reglement,
+    required InfosEntreprise infos,
+    required int largeur,
+    required int numeroImpression,
+  }) async {
+    final etroit = largeur == 58;
+    final t = etroit ? 7.5 : 9.0;
+    final petit = t - 1;
+    final unite = infos.devise.isEmpty ? '' : ' ${infos.devise}';
+    final client = reglement.type == 'client';
+
+    pw.TextStyle style(double taille, {bool gras = false}) => pw.TextStyle(
+      fontSize: taille,
+      fontWeight: gras ? pw.FontWeight.bold : pw.FontWeight.normal,
+    );
+
+    pw.Widget ligne(
+      String gauche,
+      String droite, {
+      bool gras = false,
+      double? taille,
+    }) {
+      return pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Expanded(
+            child: pw.Text(gauche, style: style(taille ?? t, gras: gras)),
+          ),
+          pw.SizedBox(width: 4),
+          pw.Text(droite, style: style(taille ?? t, gras: gras)),
+        ],
+      );
+    }
+
+    pw.Widget centre(String texte, {double? taille, bool gras = false}) {
+      return pw.Center(
+        child: pw.Text(
+          texte,
+          textAlign: pw.TextAlign.center,
+          style: style(taille ?? t, gras: gras),
+        ),
+      );
+    }
+
+    pw.Widget trait() => pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(vertical: 3),
+      child: pw.Divider(
+        height: 1,
+        thickness: 0.5,
+        borderStyle: pw.BorderStyle.dashed,
+      ),
+    );
+
+    final contenu = <pw.Widget>[
+      if (infos.nom.isNotEmpty)
+        centre(infos.nom.toUpperCase(), taille: t + 2, gras: true),
+      centre(
+        'Agence ${reglement.agence}'
+        '${reglement.agenceVille == null ? '' : ' - ${reglement.agenceVille}'}',
+        taille: petit,
+      ),
+      if (reglement.agenceTelephone != null)
+        centre('Tél : ${reglement.agenceTelephone}', taille: petit),
+      if (infos.infos.isNotEmpty) centre(infos.infos, taille: petit),
+      trait(),
+
+      centre(client ? 'RECU DE REGLEMENT' : 'PAIEMENT FOURNISSEUR', gras: true),
+      centre('N° ${reglement.code}', gras: true),
+      if (numeroImpression > 1)
+        centre('*** DUPLICATA n°$numeroImpression ***', gras: true),
+      pw.SizedBox(height: 2),
+      pw.Text('Date : ${formaterDate(reglement.date)}', style: style(petit)),
+      pw.Text(
+        '${client ? 'Client' : 'Fournisseur'} : ${reglement.tiers}',
+        style: style(petit),
+      ),
+      pw.Text('Saisi par : ${reglement.utilisateur}', style: style(petit)),
+      trait(),
+
+      pw.Text('Factures réglées', style: style(t, gras: true)),
+      for (final l in reglement.lignes)
+        ligne('  ${l.documentCode}', formaterPrix(l.montant)),
+      trait(),
+
+      ligne(
+        'TOTAL REGLE',
+        '${formaterPrix(reglement.montant)}$unite',
+        gras: true,
+        taille: t + 3,
+      ),
+      for (final p in reglement.modes) ...[
+        ligne(p.mode, formaterPrix(p.montant)),
+        if (p.reference != null)
+          pw.Text('  Réf. ${p.reference}', style: style(petit)),
+      ],
+      trait(),
+
+      ligne(
+        'Solde restant dû',
+        '${formaterPrix(reglement.soldeRestant)}$unite',
+        gras: true,
+      ),
+      trait(),
+      if (infos.message.isNotEmpty) centre(infos.message, taille: petit),
+      pw.SizedBox(height: 6),
+    ];
+
+    final document = pw.Document(title: 'Reçu ${reglement.code}');
+    document.addPage(
+      pw.Page(
+        pageFormat: _format(largeur),
+        build: (context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+          children: contenu,
+        ),
+      ),
+    );
+    return document.save();
+  }
+
+  // Imprime le reçu d'un règlement et compte l'impression
+  static Future<void> imprimerReglement(
+    int reglementId, {
+    bool avecDialogue = false,
+  }) async {
+    final config = await ConfigService.lire();
+    if (config == null) throw Exception('Configuration introuvable');
+
+    final reglement = await DatabaseService.detailReglement(reglementId);
+    final infos = await DatabaseService.lireInfosEntreprise();
+
+    final octets = await genererRecuReglement(
+      reglement: reglement,
+      infos: infos,
+      largeur: config.largeurPapier,
+      numeroImpression: reglement.nbImpressions + 1,
+    );
+
+    await _envoyer(
+      octets,
+      config,
+      'Reçu ${reglement.code}',
+      avecDialogue: avecDialogue,
+    );
+    await DatabaseService.noterImpressionReglement(reglementId);
   }
 }
