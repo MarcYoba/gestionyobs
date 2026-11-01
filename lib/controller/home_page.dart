@@ -17,6 +17,8 @@ import 'package:gestionyobs/page/achats_page.dart';
 import 'package:gestionyobs/page/ventes_page.dart';
 import 'package:gestionyobs/page/impression_page.dart';
 import 'package:gestionyobs/page/reglements_page.dart';
+import 'package:gestionyobs/service/backup_service.dart';
+import 'package:gestionyobs/page/sauvegardes_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -156,6 +158,13 @@ class HomePage extends StatelessWidget {
         ouvrir: (_) => const RolesDroitsPage(),
       ),
       _Module(
+        titre: 'Sauvegardes',
+        description: 'Copies de la base et restauration',
+        icone: Icons.backup,
+        permissions: ['sauvegardes.gerer'],
+        ouvrir: (_) => const SauvegardesPage(),
+      ),
+      _Module(
         titre: 'Modes de paiement',
         description: 'Espèces, mobile money, banque...',
         icone: Icons.payments,
@@ -249,6 +258,38 @@ class HomePage extends StatelessWidget {
                     children: visibles
                         .map((m) => _CarteModule(module: m))
                         .toList(),
+                  ),
+                const SizedBox(height: 24),
+                if (Session.peut('sauvegardes.gerer'))
+                  FutureBuilder<StatutSauvegarde>(
+                    future: BackupService.statut(),
+                    builder: (context, snapshot) {
+                      final s = snapshot.data;
+                      if (s == null) return const SizedBox.shrink();
+                      final alerte = s.derniere == null || (s.jours ?? 0) >= 2;
+                      if (!alerte) return const SizedBox.shrink();
+
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Card(
+                          color: Colors.orange.shade50,
+                          child: ListTile(
+                            leading: Icon(
+                              Icons.warning_amber,
+                              color: Colors.orange.shade800,
+                            ),
+                            title: Text(
+                              s.derniere == null
+                                  ? 'Aucune sauvegarde de la base de données'
+                                  : 'Dernière sauvegarde il y a ${s.jours} jours',
+                            ),
+                            subtitle: const Text(
+                              'Ouvrez « Sauvegardes » pour en faire une.',
+                            ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
               ],
             ),

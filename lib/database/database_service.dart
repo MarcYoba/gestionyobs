@@ -3634,4 +3634,65 @@ class DatabaseService {
       [id],
     );
   }
+
+  // ---------- Sauvegardes ----------
+
+  static int get versionBase => _versionBase;
+  static bool get estOuverte => _db != null;
+
+  static void _initialiserFfi() {
+    if (!_ffiInitialise) {
+      sqfliteFfiInit();
+      _ffiInitialise = true;
+    }
+  }
+
+  // Ferme la base (avant de remplacer son fichier)
+  static Future<void> fermer() async {
+    final d = _db;
+    _db = null;
+    await d?.close();
+  }
+
+  // Copie cohérente de la base, même pendant qu'elle est utilisée
+  static Future<void> sauvegarderVers(String chemin) async {
+    final sur = chemin.replaceAll("'", "''");
+    await db.execute("VACUUM INTO '$sur'");
+  }
+
+  // Le numéro de version de la structure d'un fichier de base
+  static Future<int> versionDuFichier(String chemin) async {
+    _initialiserFfi();
+    final lecture = await databaseFactoryFfi.openDatabase(
+      chemin,
+      options: OpenDatabaseOptions(readOnly: true, singleInstance: false),
+    );
+    try {
+      return await lecture.getVersion();
+    } finally {
+      await lecture.close();
+    }
+  }
+
+  // Le fichier est-il une base saine, avec nos tables ?
+  static Future<bool> verifierFichier(String chemin) async {
+    _initialiserFfi();
+    Database? lecture;
+    try {
+      lecture = await databaseFactoryFfi.openDatabase(
+        chemin,
+        options: OpenDatabaseOptions(readOnly: true, singleInstance: false),
+      );
+      final controle = await lecture.rawQuery('PRAGMA integrity_check');
+      final sain = controle.isNotEmpty && controle.first.values.first == 'ok';
+      final table = await lecture.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'utilisateurs'",
+      );
+      return sain && table.isNotEmpty;
+    } catch (_) {
+      return false;
+    } finally {
+      await lecture?.close();
+    }
+  }
 }
