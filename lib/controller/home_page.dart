@@ -21,6 +21,7 @@ import 'package:gestionyobs/service/backup_service.dart';
 import 'package:gestionyobs/page/sauvegardes_page.dart';
 import 'package:gestionyobs/page/licence_page.dart';
 import 'package:gestionyobs/service/licence_service.dart';
+import 'package:gestionyobs/page/rapports_page.dart';
 
 import 'utilisateurs_page.dart';
 
@@ -70,6 +71,13 @@ class HomePage extends StatelessWidget {
 
     // La liste complète des modules du logiciel
     final modules = <_Module>[
+      _Module(
+        titre: 'Rapports',
+        description: 'Par jour, semaine, mois, trimestre, semestre, année',
+        icone: Icons.bar_chart,
+        permissions: ['rapports.voir'],
+        ouvrir: (_) => const RapportsPage(),
+      ),
       _Module(
         titre: 'Ventes',
         description: 'Caisse, factures et crédits',
