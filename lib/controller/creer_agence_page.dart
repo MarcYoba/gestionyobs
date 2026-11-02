@@ -4,7 +4,7 @@ import 'apres_connexion_page.dart';
 
 import 'package:gestionyobs/database/database_service.dart';
 
-import 'home_page.dart';
+import 'main_shell.dart';
 
 import 'package:gestionyobs/security/login_page.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
@@ -61,7 +61,7 @@ class _CreerAgencePageState extends State<CreerAgencePage> {
         Session.agenceCourante = agence;
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => const HomePage()),
+          MaterialPageRoute(builder: (_) => const MainShell()),
         );
       } else {
         // Nouvelle agence : on revient à la liste, mise à jour

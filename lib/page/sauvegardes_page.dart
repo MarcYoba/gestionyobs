@@ -165,8 +165,7 @@ class _SauvegardesPageState extends State<SauvegardesPage> {
       erreur ??
           'Base restaurée depuis la sauvegarde du ${formaterDateHeure(f.date)}',
     );
-    Navigator.pushAndRemoveUntil(
-      context,
+    Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
       MaterialPageRoute(builder: (_) => const StartupPage()),
       (route) => false,
     );
