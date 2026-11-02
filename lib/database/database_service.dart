@@ -20,6 +20,7 @@ import 'package:gestionyobs/modules/achat.dart';
 import 'package:gestionyobs/modules/vente.dart';
 import 'package:gestionyobs/modules/reglement.dart';
 import 'package:gestionyobs/modules/annulation.dart';
+import 'package:gestionyobs/rapport/rapport.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -3971,5 +3972,363 @@ class DatabaseService {
 
       return recupere;
     });
+  }
+
+  // ---------- Rapports ----------
+
+  static Future<RapportDonnees> genererRapport({
+    required String type,
+    required DateTime reference,
+    bool toutesAgences = false,
+    bool detail = true,
+  }) async {
+    Session.exiger('rapports.voir');
+
+    final utilisateur = Session.utilisateurCourant!;
+    final agence = Session.agenceCourante;
+    if (toutesAgences && !utilisateur.estAdmin) {
+      throw Exception(
+        "Le rapport de toutes les agences est réservé à l'administrateur",
+      );
+    }
+    if (!toutesAgences && agence == null) {
+      throw Exception('Aucune agence sélectionnée');
+    }
+
+    final periode = PeriodeRapport.calculer(type, reference);
+    final debut = periode.debutTexte;
+    final fin = periode.finTexte;
+    final parMois = periode.parMois;
+
+    // Chaque section n'est visible que pour ceux qui y ont droit
+    final voirVentes = Session.peut('ventes.voir');
+    final voirAchats = Session.peut('achats.voir');
+    final voirEncaissements = voirVentes || Session.peut('reglements.voir');
+    final voirMarges = voirVentes && Session.peut('achats.prix_achat_voir');
+    final voirCreances = Session.peut('reglements.voir');
+
+    // Le filtre d'agence, et les paramètres communs (début, fin, agence)
+    final filtreV = toutesAgences ? '' : ' AND v.agence_id = ?';
+    final filtreA = toutesAgences ? '' : ' AND a.agence_id = ?';
+    final argsAgence = <Object>[if (!toutesAgences) agence!.id];
+    final argsPeriode = <Object>[debut, fin, ...argsAgence];
+
+    // La clé de regroupement : le jour, ou le mois
+    final cleV = parMois ? 'substr(v.date_vente, 1, 7)' : 'v.date_vente';
+    final cleA = parMois ? 'substr(a.date_achat, 1, 7)' : 'a.date_achat';
+    final cleP = parMois ? 'substr(p.date_paiement, 1, 7)' : 'p.date_paiement';
+
+    int entier(Object? v) => v == null ? 0 : (v as num).round();
+
+    // --- Ventes
+    final ventesParCle = <String, Map<String, Object?>>{};
+    var nbVentes = 0, ventesBrut = 0, remises = 0, ventesNet = 0;
+    if (voirVentes) {
+      final lignes = await db.rawQuery('''
+        SELECT $cleV AS cle, COUNT(*) AS nb, SUM(v.total_brut) AS brut,
+               SUM(v.total_remise) AS remise, SUM(v.net_a_payer) AS net
+        FROM ventes v
+        WHERE v.statut = 'valide' AND v.date_vente BETWEEN ? AND ?$filtreV
+        GROUP BY cle
+      ''', argsPeriode);
+      for (final l in lignes) {
+        ventesParCle[l['cle'] as String] = l;
+        nbVentes += entier(l['nb']);
+        ventesBrut += entier(l['brut']);
+        remises += entier(l['remise']);
+        ventesNet += entier(l['net']);
+      }
+    }
+
+    // --- Achats
+    final achatsParCle = <String, Map<String, Object?>>{};
+    var nbAchats = 0, achatsTotal = 0;
+    if (voirAchats) {
+      final lignes = await db.rawQuery('''
+        SELECT $cleA AS cle, COUNT(*) AS nb, SUM(a.total_ttc) AS total
+        FROM achats a
+        WHERE a.statut = 'valide' AND a.date_achat BETWEEN ? AND ?$filtreA
+        GROUP BY cle
+      ''', argsPeriode);
+      for (final l in lignes) {
+        achatsParCle[l['cle'] as String] = l;
+        nbAchats += entier(l['nb']);
+        achatsTotal += entier(l['total']);
+      }
+    }
+
+    // --- Encaissements (paiements reçus des clients)
+    final encaissementsParCle = <String, Map<String, Object?>>{};
+    var nbEncaissements = 0, encaisse = 0;
+    final modes = <ModeEncaisse>[];
+    if (voirEncaissements) {
+      final lignes = await db.rawQuery('''
+        SELECT $cleP AS cle, COUNT(*) AS nb, SUM(p.montant) AS total
+        FROM paiements p
+        INNER JOIN ventes v ON v.id = p.document_id
+        WHERE p.type_document = 'vente' AND v.statut = 'valide'
+          AND p.date_paiement BETWEEN ? AND ?$filtreV
+        GROUP BY cle
+      ''', argsPeriode);
+      for (final l in lignes) {
+        encaissementsParCle[l['cle'] as String] = l;
+        nbEncaissements += entier(l['nb']);
+        encaisse += entier(l['total']);
+      }
+
+      final parMode = await db.rawQuery('''
+        SELECT m.libelle AS mode, COUNT(*) AS nb, SUM(p.montant) AS total
+        FROM paiements p
+        INNER JOIN ventes v ON v.id = p.document_id
+        INNER JOIN modes_paiement m ON m.id = p.mode_id
+        WHERE p.type_document = 'vente' AND v.statut = 'valide'
+          AND p.date_paiement BETWEEN ? AND ?$filtreV
+        GROUP BY m.id
+        ORDER BY total DESC
+      ''', argsPeriode);
+      for (final l in parMode) {
+        modes.add(
+          ModeEncaisse(
+            mode: l['mode'] as String,
+            nombre: entier(l['nb']),
+            montant: entier(l['total']),
+          ),
+        );
+      }
+    }
+
+    // --- Marges (prix de vente net - prix d'achat)
+    final margesParCle = <String, Map<String, Object?>>{};
+    var caAvecCout = 0, coutVendu = 0, nbSansCout = 0, caSansCout = 0;
+    final marges = <MargeArticle>[];
+    var margesTronquees = false;
+    if (voirMarges) {
+      final lignes = await db.rawQuery('''
+        SELECT $cleV AS cle, SUM(l.total_net) AS ca,
+               SUM(l.quantite * l.prix_achat) AS cout
+        FROM vente_lignes l
+        INNER JOIN ventes v ON v.id = l.vente_id
+        WHERE v.statut = 'valide' AND v.date_vente BETWEEN ? AND ?$filtreV
+          AND l.prix_achat IS NOT NULL
+        GROUP BY cle
+      ''', argsPeriode);
+      for (final l in lignes) {
+        margesParCle[l['cle'] as String] = l;
+        caAvecCout += entier(l['ca']);
+        coutVendu += entier(l['cout']);
+      }
+
+      final sans = await db.rawQuery('''
+        SELECT COUNT(*) AS nb, COALESCE(SUM(l.total_net), 0) AS ca
+        FROM vente_lignes l
+        INNER JOIN ventes v ON v.id = l.vente_id
+        WHERE v.statut = 'valide' AND v.date_vente BETWEEN ? AND ?$filtreV
+          AND l.prix_achat IS NULL
+      ''', argsPeriode);
+      nbSansCout = entier(sans.first['nb']);
+      caSansCout = entier(sans.first['ca']);
+
+      final parArticle = await db.rawQuery('''
+        SELECT l.code_article AS code, l.designation AS designation,
+               SUM(l.quantite) AS qte, SUM(l.total_net) AS ca,
+               SUM(l.quantite * l.prix_achat) AS cout
+        FROM vente_lignes l
+        INNER JOIN ventes v ON v.id = l.vente_id
+        WHERE v.statut = 'valide' AND v.date_vente BETWEEN ? AND ?$filtreV
+          AND l.prix_achat IS NOT NULL
+        GROUP BY l.article_id
+        ORDER BY (SUM(l.total_net) - SUM(l.quantite * l.prix_achat)) DESC
+        LIMIT 501
+      ''', argsPeriode);
+      margesTronquees = parArticle.length > 500;
+      for (final l in parArticle.take(500)) {
+        marges.add(
+          MargeArticle(
+            code: l['code'] as String,
+            designation: l['designation'] as String,
+            quantite: (l['qte'] as num).toDouble(),
+            ca: entier(l['ca']),
+            cout: entier(l['cout']),
+          ),
+        );
+      }
+    }
+
+    // --- Le tableau d'évolution
+    final evolution = <LigneEvolution>[];
+    for (final sp in periode.sousPeriodes()) {
+      final m = margesParCle[sp.cle];
+      evolution.add(
+        LigneEvolution(
+          libelle: sp.libelle,
+          ventes: entier(ventesParCle[sp.cle]?['net']),
+          achats: entier(achatsParCle[sp.cle]?['total']),
+          encaissements: entier(encaissementsParCle[sp.cle]?['total']),
+          marge: m == null ? 0 : entier(m['ca']) - entier(m['cout']),
+        ),
+      );
+    }
+
+    // --- Les listes détaillées des ventes et des achats
+    final ventes = <OpVente>[];
+    var ventesTronquees = false;
+    if (voirVentes && detail) {
+      final lignes = await db.rawQuery('''
+        SELECT v.code, v.date_vente, t.nom AS client, ag.nom AS agence,
+               v.total_brut, v.total_remise, v.net_a_payer
+        FROM ventes v
+        INNER JOIN tiers t ON t.id = v.client_id
+        INNER JOIN agences ag ON ag.id = v.agence_id
+        WHERE v.statut = 'valide' AND v.date_vente BETWEEN ? AND ?$filtreV
+        ORDER BY v.date_vente, v.id
+        LIMIT ${limiteLignesRapport + 1}
+      ''', argsPeriode);
+      ventesTronquees = lignes.length > limiteLignesRapport;
+      for (final l in lignes.take(limiteLignesRapport)) {
+        ventes.add(
+          OpVente(
+            code: l['code'] as String,
+            date: DateTime.parse(l['date_vente'] as String),
+            client: l['client'] as String,
+            agence: l['agence'] as String,
+            brut: entier(l['total_brut']),
+            remise: entier(l['total_remise']),
+            net: entier(l['net_a_payer']),
+          ),
+        );
+      }
+    }
+
+    final achats = <OpAchat>[];
+    var achatsTronques = false;
+    if (voirAchats && detail) {
+      final lignes = await db.rawQuery('''
+        SELECT a.code, a.date_achat, t.nom AS fournisseur, ag.nom AS agence,
+               a.total_ttc
+        FROM achats a
+        INNER JOIN tiers t ON t.id = a.fournisseur_id
+        INNER JOIN agences ag ON ag.id = a.agence_id
+        WHERE a.statut = 'valide' AND a.date_achat BETWEEN ? AND ?$filtreA
+        ORDER BY a.date_achat, a.id
+        LIMIT ${limiteLignesRapport + 1}
+      ''', argsPeriode);
+      achatsTronques = lignes.length > limiteLignesRapport;
+      for (final l in lignes.take(limiteLignesRapport)) {
+        achats.add(
+          OpAchat(
+            code: l['code'] as String,
+            date: DateTime.parse(l['date_achat'] as String),
+            fournisseur: l['fournisseur'] as String,
+            agence: l['agence'] as String,
+            total: entier(l['total_ttc']),
+          ),
+        );
+      }
+    }
+
+    // --- Les créances et les dettes, à la fin de la période
+    final creances = <SoldeRapport>[];
+    final dettes = <SoldeRapport>[];
+    var totalCreances = 0, nbCreances = 0, totalDettes = 0, nbDettes = 0;
+    if (voirCreances) {
+      final argsSolde = <Object>[fin, fin, ...argsAgence];
+
+      final lignesC = await db.rawQuery('''
+        SELECT t.nom AS nom, COUNT(*) AS nb, SUM(x.reste) AS montant
+        FROM (
+          SELECT v.client_id AS tiers_id,
+                 v.net_a_payer - COALESCE(
+                   (SELECT SUM(p.montant) FROM paiements p
+                    WHERE p.type_document = 'vente' AND p.document_id = v.id
+                      AND p.date_paiement <= ?), 0) AS reste
+          FROM ventes v
+          WHERE v.statut = 'valide' AND v.date_vente <= ?$filtreV
+        ) x
+        INNER JOIN tiers t ON t.id = x.tiers_id
+        WHERE x.reste > 0
+        GROUP BY t.id
+        ORDER BY montant DESC
+      ''', argsSolde);
+      for (final l in lignesC) {
+        final s = SoldeRapport(
+          nom: l['nom'] as String,
+          nombre: entier(l['nb']),
+          montant: entier(l['montant']),
+        );
+        creances.add(s);
+        totalCreances += s.montant;
+        nbCreances += s.nombre;
+      }
+
+      final lignesD = await db.rawQuery('''
+        SELECT t.nom AS nom, COUNT(*) AS nb, SUM(x.reste) AS montant
+        FROM (
+          SELECT a.fournisseur_id AS tiers_id,
+                 a.total_ttc - COALESCE(
+                   (SELECT SUM(p.montant) FROM paiements p
+                    WHERE p.type_document = 'achat' AND p.document_id = a.id
+                      AND p.date_paiement <= ?), 0) AS reste
+          FROM achats a
+          WHERE a.statut = 'valide' AND a.date_achat <= ?$filtreA
+        ) x
+        INNER JOIN tiers t ON t.id = x.tiers_id
+        WHERE x.reste > 0
+        GROUP BY t.id
+        ORDER BY montant DESC
+      ''', argsSolde);
+      for (final l in lignesD) {
+        final s = SoldeRapport(
+          nom: l['nom'] as String,
+          nombre: entier(l['nb']),
+          montant: entier(l['montant']),
+        );
+        dettes.add(s);
+        totalDettes += s.montant;
+        nbDettes += s.nombre;
+      }
+    }
+
+    return RapportDonnees(
+      periode: periode,
+      portee: toutesAgences ? 'Toutes les agences' : 'Agence ${agence!.nom}',
+      toutesAgences: toutesAgences,
+      detail: detail,
+      voirVentes: voirVentes,
+      voirAchats: voirAchats,
+      voirEncaissements: voirEncaissements,
+      voirMarges: voirMarges,
+      voirCreances: voirCreances,
+      totaux: TotauxRapport(
+        nbVentes: nbVentes,
+        ventesBrut: ventesBrut,
+        remises: remises,
+        ventesNet: ventesNet,
+        nbAchats: nbAchats,
+        achats: achatsTotal,
+        nbEncaissements: nbEncaissements,
+        encaisse: encaisse,
+        marge: caAvecCout - coutVendu,
+        coutVendu: coutVendu,
+        caAvecCout: caAvecCout,
+        nbLignesSansCout: nbSansCout,
+        caSansCout: caSansCout,
+        creances: totalCreances,
+        nbCreances: nbCreances,
+        dettes: totalDettes,
+        nbDettes: nbDettes,
+      ),
+      evolution: evolution,
+      ventes: ventes,
+      ventesTronquees: ventesTronquees,
+      achats: achats,
+      achatsTronques: achatsTronques,
+      modes: modes,
+      marges: marges,
+      margesTronquees: margesTronquees,
+      creances: creances,
+      dettes: dettes,
+      genereLe: DateTime.now(),
+      genererPar: utilisateur.nomComplet,
+    );
   }
 }

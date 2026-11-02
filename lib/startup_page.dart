@@ -8,6 +8,8 @@ import 'package:gestionyobs/security/login_page.dart';
 import 'package:gestionyobs/controller/premier_admin_page.dart';
 import 'package:gestionyobs/service/backup_service.dart';
 import 'package:gestionyobs/app/messages_app.dart';
+import 'package:gestionyobs/page/licence_page.dart';
+import 'package:gestionyobs/service/licence_service.dart';
 
 class StartupPage extends StatefulWidget {
   const StartupPage({super.key});
@@ -35,6 +37,20 @@ class _StartupPageState extends State<StartupPage> {
     // Pas de configuration : assistant
     if (config == null) {
       _aller(const ConfigPage());
+      return;
+    }
+
+    // Licence : essai de 30 jours, puis activation obligatoire
+    final licence = await LicenceService.verifier();
+    if (!mounted) return;
+    if (!licence.autorise ||
+        (!licence.licencie && licence.joursRestants <= 5)) {
+      // Essai terminé : page de licence obligatoire.
+      // Les 5 derniers jours : la page s'ouvre, mais on peut continuer l'essai.
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => LicencePage(demarrage: true)),
+      );
       return;
     }
 
