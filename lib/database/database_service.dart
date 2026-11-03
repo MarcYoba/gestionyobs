@@ -4331,4 +4331,89 @@ class DatabaseService {
       genererPar: utilisateur.nomComplet,
     );
   }
+
+  // Les clients actifs, par nom, téléphone ou matricule (le client comptant en premier)
+  static Future<List<Tiers>> rechercherClientsVente(String recherche) async {
+    Session.exiger('ventes.creer');
+
+    final args = <Object>[];
+    var filtre = '';
+    final texte = recherche.trim();
+    if (texte.isNotEmpty) {
+      filtre = ' AND (code LIKE ? OR nom LIKE ? OR telephone LIKE ?)';
+      args.addAll(List.filled(3, '%$texte%'));
+    }
+
+    final lignes = await db.query(
+      'tiers',
+      where: 'est_client = 1 AND actif = 1$filtre',
+      whereArgs: args.isEmpty ? null : args,
+      orderBy: 'systeme DESC, nom COLLATE NOCASE',
+      limit: 50,
+    );
+    return lignes.map(Tiers.fromMap).toList();
+  }
+
+  // Crée un client depuis la caisse : nom et téléphone, sans crédit.
+  // Si le numéro existe déjà, on retourne le client existant.
+  static Future<ResultatClientRapide> creerClientRapide({
+    required String nom,
+    String? telephone,
+  }) async {
+    Session.exiger('ventes.creer');
+
+    final propre = nom.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (propre.isEmpty) throw Exception('Le nom du client est vide');
+
+    final tel = _videEnNull(telephone);
+    String chiffres(String s) => s.replaceAll(RegExp(r'\D'), '');
+    if (tel != null && chiffres(tel).length < 6) {
+      throw Exception('Numéro de téléphone trop court');
+    }
+
+    return db.transaction((txn) async {
+      // Ce numéro existe-t-il déjà ? On compare les chiffres seulement
+      if (tel != null) {
+        final candidats = await txn.query(
+          'tiers',
+          where: "est_client = 1 AND telephone IS NOT NULL AND telephone != ''",
+        );
+        for (final m in candidats) {
+          if (chiffres(m['telephone'] as String) == chiffres(tel)) {
+            final existant = Tiers.fromMap(m);
+            if (!existant.actif) {
+              throw Exception(
+                'Ce numéro appartient au client désactivé « ${existant.nom} »',
+              );
+            }
+            return ResultatClientRapide(client: existant, existant: true);
+          }
+        }
+      }
+
+      final code = await _prochainMatricule(txn, 'tiers');
+      final id = await txn.insert('tiers', {
+        'code': code,
+        'nom': propre,
+        'est_client': 1,
+        'est_fournisseur': 0,
+        'telephone': tel,
+        'plafond_credit': 0,
+        'systeme': 0,
+        'actif': 1,
+        'cree_le': DateTime.now().toIso8601String(),
+      });
+
+      final ligne = await txn.query(
+        'tiers',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      return ResultatClientRapide(
+        client: Tiers.fromMap(ligne.first),
+        existant: false,
+      );
+    });
+  }
 }
