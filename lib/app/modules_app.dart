@@ -17,6 +17,7 @@ import 'package:gestionyobs/page/reglements_page.dart';
 import 'package:gestionyobs/page/sauvegardes_page.dart';
 import 'package:gestionyobs/page/licence_page.dart';
 import 'package:gestionyobs/page/rapports_page.dart';
+import 'package:gestionyobs/page/depenses_page.dart';
 
 import 'package:gestionyobs/controller/utilisateurs_page.dart';
 
@@ -82,6 +83,13 @@ List<ModuleApp> construireModules() {
         'reglements.fournisseurs',
       ],
       ouvrir: (_) => const ReglementsPage(),
+    ),
+    ModuleApp(
+      titre: 'Dépenses',
+      description: 'Salaires, charges et autres dépenses',
+      icone: Icons.money_off,
+      permissions: ['depenses.voir', 'depenses.creer'],
+      ouvrir: (_) => const DepensesPage(),
     ),
     ModuleApp(
       titre: 'Stock',

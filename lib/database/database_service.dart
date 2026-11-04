@@ -21,6 +21,7 @@ import 'package:gestionyobs/modules/vente.dart';
 import 'package:gestionyobs/modules/reglement.dart';
 import 'package:gestionyobs/modules/annulation.dart';
 import 'package:gestionyobs/rapport/rapport.dart';
+import 'package:gestionyobs/modules/depense.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -56,7 +57,9 @@ class DatabaseService {
   // Version 15 : règlements (encaissement des créances, paiement des dettes).
   //static const int _versionBase = 15;
   // Version 16 : annulation des ventes et des achats.
-  static const int _versionBase = 16;
+  //static const int _versionBase = 16;
+  // Version 16 : dépenses (salaires, charges, autres dépenses).
+  static const int _versionBase = 17;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -98,6 +101,7 @@ class DatabaseService {
           await _creerTablesImpression(db);
           await _creerTablesReglements(db);
           await _migrerAnnulations(db);
+          await _creerTableDepenses(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -147,6 +151,9 @@ class DatabaseService {
           }
           if (ancienneVersion < 16) {
             await _migrerAnnulations(db);
+          }
+          if (ancienneVersion < 17) {
+            await _creerTableDepenses(db);
           }
         },
       ),
@@ -4415,5 +4422,302 @@ class DatabaseService {
         existant: false,
       );
     });
+  }
+
+  // ---------- Dépenses ----------
+
+  static Future<void> _creerTableDepenses(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS depenses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        agence_id INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        date_depense TEXT NOT NULL,
+        libelle TEXT NOT NULL,
+        beneficiaire TEXT,
+        compte_id INTEGER NOT NULL,
+        numero_compte TEXT NOT NULL,
+        intitule_compte TEXT NOT NULL,
+        montant INTEGER NOT NULL,
+        piece TEXT,
+        note TEXT,
+        statut TEXT NOT NULL DEFAULT 'valide',
+        utilisateur_id INTEGER NOT NULL,
+        cree_le TEXT NOT NULL,
+        FOREIGN KEY (agence_id) REFERENCES agences(id),
+        FOREIGN KEY (compte_id) REFERENCES comptes_comptables(id),
+        FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_depenses_agence ON depenses (agence_id, date_depense)',
+    );
+  }
+
+  // Les comptes proposés dans le formulaire de dépense
+  // (celui qui enregistre une dépense n'a pas besoin des droits de comptabilité)
+  static Future<List<CompteComptable>> comptesPourDepense() async {
+    Session.exiger('depenses.creer');
+
+    final lignes = await db.query(
+      'comptes_comptables',
+      where: 'actif = 1',
+      orderBy: 'numero',
+    );
+    final numeros = lignes.map((m) => m['numero'] as String).toList();
+
+    final comptes = <CompteComptable>[];
+    for (var i = 0; i < lignes.length; i++) {
+      final m = lignes[i];
+      final regroupement =
+          i + 1 < numeros.length && numeros[i + 1].startsWith(numeros[i]);
+      comptes.add(
+        CompteComptable(
+          id: m['id'] as int,
+          numero: numeros[i],
+          intitule: m['intitule'] as String,
+          classe: m['classe'] as int,
+          actif: true,
+          imputable: !regroupement,
+        ),
+      );
+    }
+    return comptes;
+  }
+
+  // Le compte par défaut d'un type de dépense, réglé par le comptable
+  static Future<CompteComptable?> compteParDefautDepense(String type) async {
+    Session.exiger('depenses.creer');
+
+    final r = await resoudreCompte(poste: 'depense.$type');
+    if (r == null) return null;
+
+    final lignes = await db.query(
+      'comptes_comptables',
+      where: 'numero = ? AND actif = 1',
+      whereArgs: [r.numero],
+      limit: 1,
+    );
+    if (lignes.isEmpty) return null;
+
+    final m = lignes.first;
+    return CompteComptable(
+      id: m['id'] as int,
+      numero: m['numero'] as String,
+      intitule: m['intitule'] as String,
+      classe: m['classe'] as int,
+      actif: true,
+      imputable: true,
+    );
+  }
+
+  // Les comptes utilisés récemment pour ce type de dépense
+  static Future<List<CompteComptable>> comptesRecentsDepense(
+    String type,
+  ) async {
+    Session.exiger('depenses.creer');
+
+    final lignes = await db.rawQuery(
+      '''
+      SELECT c.id, c.numero, c.intitule, c.classe, MAX(d.id) AS dernier
+      FROM depenses d
+      INNER JOIN comptes_comptables c ON c.id = d.compte_id
+      WHERE d.type = ? AND c.actif = 1
+      GROUP BY c.id
+      ORDER BY dernier DESC
+      LIMIT 6
+    ''',
+      [type],
+    );
+
+    return lignes
+        .map(
+          (m) => CompteComptable(
+            id: m['id'] as int,
+            numero: m['numero'] as String,
+            intitule: m['intitule'] as String,
+            classe: m['classe'] as int,
+            actif: true,
+            imputable: true,
+          ),
+        )
+        .toList();
+  }
+
+  // Enregistre une dépense et son paiement. Retourne son matricule.
+  static Future<String> creerDepense({
+    required String type,
+    required DateTime date,
+    required String libelle,
+    String? beneficiaire,
+    required int compteId,
+    required int montant,
+    required int modeId,
+    String? reference,
+    String? piece,
+    String? note,
+  }) async {
+    Session.exiger('depenses.creer');
+
+    if (!typesDepense.containsKey(type)) {
+      throw Exception('Type de dépense inconnu');
+    }
+    if (type == 'salaire' && !Session.peut('depenses.salaires')) {
+      throw Exception("Vous n'avez pas le droit d'enregistrer un salaire");
+    }
+
+    final agence = Session.agenceCourante;
+    final utilisateur = Session.utilisateurCourant;
+    if (agence == null || utilisateur == null) {
+      throw Exception('Aucune agence sélectionnée');
+    }
+
+    final lib = libelle.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (lib.isEmpty) throw Exception('Le libellé de la dépense est vide');
+    if (montant <= 0) throw Exception('Le montant doit être supérieur à zéro');
+
+    final benef = _videEnNull(beneficiaire);
+    if (type == 'salaire' && benef == null) {
+      throw Exception("Indiquez l'employé concerné par ce salaire");
+    }
+
+    final maintenant = DateTime.now();
+    final jour = DateTime(date.year, date.month, date.day);
+    if (jour.isAfter(
+      DateTime(maintenant.year, maintenant.month, maintenant.day),
+    )) {
+      throw Exception('La date ne peut pas être dans le futur');
+    }
+    String deux(int n) => n.toString().padLeft(2, '0');
+    final dateTexte = '${jour.year}-${deux(jour.month)}-${deux(jour.day)}';
+
+    return db.transaction((txn) async {
+      // Le compte comptable : actif, et précis (pas un compte de regroupement)
+      final c = await txn.query(
+        'comptes_comptables',
+        where: 'id = ?',
+        whereArgs: [compteId],
+        limit: 1,
+      );
+      if (c.isEmpty) throw Exception('Compte comptable introuvable');
+      if (c.first['actif'] != 1) throw Exception('Ce compte est désactivé');
+
+      final numeroCompte = c.first['numero'] as String;
+      final enfants = await txn.rawQuery(
+        'SELECT COUNT(*) AS n FROM comptes_comptables '
+        'WHERE actif = 1 AND numero != ? AND numero LIKE ?',
+        [numeroCompte, '$numeroCompte%'],
+      );
+      if ((enfants.first['n'] as int) > 0) {
+        throw Exception(
+          'Le compte $numeroCompte est un compte de regroupement : '
+          'choisissez un compte plus précis',
+        );
+      }
+
+      // Le mode de paiement
+      final m = await txn.query(
+        'modes_paiement',
+        columns: ['libelle', 'reference_obligatoire', 'actif'],
+        where: 'id = ?',
+        whereArgs: [modeId],
+        limit: 1,
+      );
+      if (m.isEmpty || m.first['actif'] != 1) {
+        throw Exception('Mode de paiement indisponible');
+      }
+      if (m.first['reference_obligatoire'] == 1 &&
+          (reference ?? '').trim().isEmpty) {
+        throw Exception(
+          'Une référence est obligatoire pour « ${m.first['libelle']} »',
+        );
+      }
+
+      final code = await _prochainMatricule(txn, 'depenses');
+      final depenseId = await txn.insert('depenses', {
+        'code': code,
+        'agence_id': agence.id,
+        'type': type,
+        'date_depense': dateTexte,
+        'libelle': lib,
+        'beneficiaire': benef,
+        'compte_id': compteId,
+        'numero_compte': numeroCompte,
+        'intitule_compte': c.first['intitule'],
+        'montant': montant,
+        'piece': _videEnNull(piece),
+        'note': _videEnNull(note),
+        'statut': 'valide',
+        'utilisateur_id': utilisateur.id,
+        'cree_le': maintenant.toIso8601String(),
+      });
+
+      // La sortie d'argent, par mode de paiement
+      await txn.insert('paiements', {
+        'type_document': 'depense',
+        'document_id': depenseId,
+        'mode_id': modeId,
+        'montant': montant,
+        'reference': _videEnNull(reference),
+        'date_paiement': dateTexte,
+        'utilisateur_id': utilisateur.id,
+        'cree_le': maintenant.toIso8601String(),
+      });
+
+      return code;
+    });
+  }
+
+  // Les dépenses de l'agence courante sur une période
+  static Future<List<DepenseResume>> listerDepenses({
+    required DateTime debut,
+    required DateTime fin,
+    String? type,
+    String recherche = '',
+  }) async {
+    Session.exiger('depenses.voir');
+
+    final agence = Session.agenceCourante;
+    if (agence == null) throw Exception('Aucune agence sélectionnée');
+
+    String deux(int n) => n.toString().padLeft(2, '0');
+    String jour(DateTime d) => '${d.year}-${deux(d.month)}-${deux(d.day)}';
+
+    final args = <Object>[agence.id, jour(debut), jour(fin)];
+    var filtre = '';
+
+    // Les salaires sont confidentiels
+    if (!Session.peut('depenses.salaires')) {
+      filtre += " AND d.type != 'salaire'";
+    }
+    if (type != null) {
+      filtre += ' AND d.type = ?';
+      args.add(type);
+    }
+    final texte = recherche.trim();
+    if (texte.isNotEmpty) {
+      filtre +=
+          ' AND (d.libelle LIKE ? OR d.beneficiaire LIKE ? OR d.code LIKE ? '
+          'OR d.numero_compte LIKE ? OR d.intitule_compte LIKE ?)';
+      args.addAll(List.filled(5, '%$texte%'));
+    }
+
+    final lignes = await db.rawQuery('''
+      SELECT d.id, d.code, d.type, d.date_depense, d.libelle, d.beneficiaire,
+             d.numero_compte, d.intitule_compte, d.montant, d.piece,
+             m.libelle AS mode, u.nom_complet AS utilisateur
+      FROM depenses d
+      INNER JOIN utilisateurs u ON u.id = d.utilisateur_id
+      LEFT JOIN paiements p
+             ON p.type_document = 'depense' AND p.document_id = d.id
+      LEFT JOIN modes_paiement m ON m.id = p.mode_id
+      WHERE d.agence_id = ? AND d.statut = 'valide'
+        AND d.date_depense BETWEEN ? AND ?$filtre
+      ORDER BY d.date_depense DESC, d.id DESC
+      LIMIT 500
+    ''', args);
+
+    return lignes.map(DepenseResume.fromMap).toList();
   }
 }

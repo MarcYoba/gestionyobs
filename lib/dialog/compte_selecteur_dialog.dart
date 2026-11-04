@@ -7,11 +7,15 @@ class CompteSelecteurDialog extends StatefulWidget {
   final List<CompteComptable> comptes;
   final List<String> propositions; // numéros à mettre en avant
 
+  // Si renseigné, la recherche se limite d'abord à ces classes de comptes
+  final Set<int>? classes;
+
   const CompteSelecteurDialog({
     super.key,
     required this.titre,
     required this.comptes,
     this.propositions = const [],
+    this.classes,
   });
 
   @override
@@ -21,11 +25,17 @@ class CompteSelecteurDialog extends StatefulWidget {
 class _CompteSelecteurDialogState extends State<CompteSelecteurDialog> {
   final _controller = TextEditingController();
   bool _regroupement = false;
+  bool _toutesClasses = false;
 
   @override
   void dispose() {
     _controller.dispose();
     super.dispose();
+  }
+
+  bool _classeAutorisee(CompteComptable c) {
+    final classes = widget.classes;
+    return classes == null || _toutesClasses || classes.contains(c.classe);
   }
 
   List<CompteComptable> get _resultats {
@@ -35,6 +45,7 @@ class _CompteSelecteurDialogState extends State<CompteSelecteurDialog> {
         .where((c) {
           if (!c.actif) return false;
           if (!_regroupement && !c.imputable) return false;
+          if (!_classeAutorisee(c)) return false;
           return c.numero.startsWith(texte) ||
               c.intitule.toLowerCase().contains(texte);
         })
@@ -63,7 +74,7 @@ class _CompteSelecteurDialogState extends State<CompteSelecteurDialog> {
       title: Text('Compte pour : ${widget.titre}'),
       content: SizedBox(
         width: 580,
-        height: 460,
+        height: 480,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -77,6 +88,18 @@ class _CompteSelecteurDialogState extends State<CompteSelecteurDialog> {
                 border: OutlineInputBorder(),
               ),
             ),
+            if (widget.classes != null)
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                controlAffinity: ListTileControlAffinity.leading,
+                title: Text(
+                  'Afficher aussi les autres classes de comptes '
+                  '(proposées : ${widget.classes!.join(', ')})',
+                ),
+                value: _toutesClasses,
+                onChanged: (v) => setState(() => _toutesClasses = v ?? false),
+              ),
             CheckboxListTile(
               contentPadding: EdgeInsets.zero,
               dense: true,
@@ -123,9 +146,12 @@ class _CompteSelecteurDialogState extends State<CompteSelecteurDialog> {
                         return ListTile(
                           dense: true,
                           title: Text('${c.numero}  ${c.intitule}'),
-                          subtitle: c.imputable
-                              ? null
-                              : const Text('Compte de regroupement'),
+                          subtitle: Text(
+                            [
+                              'Classe ${c.classe} : ${nomsClasses[c.classe] ?? ''}',
+                              if (!c.imputable) 'Compte de regroupement',
+                            ].join(' · '),
+                          ),
                           onTap: () => Navigator.pop(context, c),
                         );
                       },

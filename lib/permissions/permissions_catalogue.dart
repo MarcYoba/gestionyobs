@@ -146,6 +146,21 @@ const List<PermissionDef> cataloguePermissions = [
     'Administration',
     adminSeulement: true,
   ),
+  PermissionDef(
+    'depenses.voir',
+    'Consulter les dépenses (charges et autres dépenses)',
+    'Dépenses',
+  ),
+  PermissionDef(
+    'depenses.creer',
+    'Enregistrer une dépense (charge ou autre dépense)',
+    'Dépenses',
+  ),
+  PermissionDef(
+    'depenses.salaires',
+    'Voir et enregistrer les salaires',
+    'Dépenses',
+  ),
 ];
 
 /// Les droits donnés au départ aux rôles de base (d'après le tableau validé).

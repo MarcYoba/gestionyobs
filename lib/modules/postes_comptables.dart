@@ -86,6 +86,27 @@ const List<PosteComptable> cataloguePostes = [
     ['7011'],
     parClasse: true,
   ),
+  PosteComptable(
+    'depense.salaire',
+    'Dépenses : salaires',
+    'Dépenses',
+    'Compte proposé par défaut quand on enregistre un salaire',
+    ['6611', '661'],
+  ),
+  PosteComptable(
+    'depense.charge',
+    'Dépenses : charges',
+    'Dépenses',
+    'Compte proposé par défaut quand on enregistre une charge',
+    [],
+  ),
+  PosteComptable(
+    'depense.autre',
+    'Dépenses : autres dépenses',
+    'Dépenses',
+    'Compte proposé par défaut quand on enregistre une autre dépense',
+    [],
+  ),
 ];
 
 /// Les comptes proposés pour un mode de paiement, selon son type.
