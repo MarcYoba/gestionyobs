@@ -62,7 +62,9 @@ class DatabaseService {
   // Version 16 : dépenses (salaires, charges, autres dépenses).
   //static const int _versionBase = 17;
   // Version 18 : transferts de stock entre agences.
-  static const int _versionBase = 18;
+  //static const int _versionBase = 18;
+  // mets ton ancienne version + 1
+  static const int _versionBase = 19;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -106,6 +108,7 @@ class DatabaseService {
           await _migrerAnnulations(db);
           await _creerTableDepenses(db);
           await _creerTablesTransferts(db);
+          await _migrerAnnulationDepenses(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -161,6 +164,10 @@ class DatabaseService {
           }
           if (ancienneVersion < 18) {
             await _creerTablesTransferts(db);
+          }
+          if (ancienneVersion < 19) {
+            // le même numéro que ci-dessus
+            await _migrerAnnulationDepenses(db);
           }
         },
       ),
@@ -3741,6 +3748,7 @@ class DatabaseService {
     final table = switch (document) {
       'vente' => 'ventes',
       'achat' => 'achats',
+      'depense' => 'depenses',
       _ => throw Exception('Document inconnu'),
     };
     final agence = Session.agenceCourante;
@@ -4009,6 +4017,9 @@ class DatabaseService {
       throw Exception('Aucune agence sélectionnée');
     }
 
+    // final total = _depenses
+    // .where((d) => d.statut == 'valide')
+    // .fold(0, (somme, d) => somme + d.montant);
     final periode = PeriodeRapport.calculer(type, reference);
     final debut = periode.debutTexte;
     final fin = periode.finTexte;
@@ -4711,7 +4722,7 @@ class DatabaseService {
     }
 
     final lignes = await db.rawQuery('''
-      SELECT d.id, d.code, d.type, d.date_depense, d.libelle, d.beneficiaire,
+      SELECT d.id, d.code, d.type, d.date_depense, d.libelle, d.beneficiaire,d.statut,
              d.numero_compte, d.intitule_compte, d.montant, d.piece,
              m.libelle AS mode, u.nom_complet AS utilisateur
       FROM depenses d
@@ -5461,6 +5472,81 @@ class DatabaseService {
       }
 
       await _marquerAnnule(txn, 'transferts', id, utilisateur.id, raison);
+    });
+  }
+
+  // ---------- Annulation des dépenses ----------
+
+  static Future<void> _migrerAnnulationDepenses(Database db) async {
+    const colonnes = {
+      'statut': "TEXT NOT NULL DEFAULT 'valide'",
+      'annule_le': 'TEXT',
+      'annule_par': 'INTEGER',
+      'motif_annulation': 'TEXT',
+    };
+    for (final c in colonnes.entries) {
+      if (!await _colonneExiste(db, 'depenses', c.key)) {
+        await db.execute('ALTER TABLE depenses ADD COLUMN ${c.key} ${c.value}');
+      }
+    }
+  }
+
+  // Annule une dépense. Retourne le montant à réintégrer en caisse.
+  static Future<int> annulerDepense(int depenseId, String motif) async {
+    Session.exiger('depenses.annuler');
+
+    final agence = Session.agenceCourante;
+    final utilisateur = Session.utilisateurCourant;
+    if (agence == null || utilisateur == null) {
+      throw Exception('Aucune agence sélectionnée');
+    }
+    final raison = motif.trim();
+    if (raison.length < 3) throw Exception("Indiquez le motif de l'annulation");
+
+    final maintenant = DateTime.now();
+    String deux(int n) => n.toString().padLeft(2, '0');
+    final dateTexte =
+        '${maintenant.year}-${deux(maintenant.month)}-${deux(maintenant.day)}';
+
+    return db.transaction((txn) async {
+      final d = await txn.query(
+        'depenses',
+        columns: ['montant', 'statut'],
+        where: 'id = ? AND agence_id = ?',
+        whereArgs: [depenseId, agence.id],
+        limit: 1,
+      );
+      if (d.isEmpty) throw Exception('Dépense introuvable');
+      if (d.first['statut'] != 'valide') {
+        throw Exception('Cette dépense est déjà annulée');
+      }
+      final montant = d.first['montant'] as int;
+
+      // Si la sortie d'argent est dans « paiements », on la contre-passe.
+      // S'il n'y en a pas, rien n'est écrit.
+      await _contrepasser(
+        txn,
+        typeSource: 'depense',
+        documentId: depenseId,
+        utilisateurId: utilisateur.id,
+        dateTexte: dateTexte,
+        maintenant: maintenant,
+      );
+
+      final n = await txn.update(
+        'depenses',
+        {
+          'statut': 'annule',
+          'annule_le': maintenant.toIso8601String(),
+          'annule_par': utilisateur.id,
+          'motif_annulation': raison,
+        },
+        where: "id = ? AND statut = 'valide'",
+        whereArgs: [depenseId],
+      );
+      if (n != 1) throw Exception('Cette dépense est déjà annulée');
+
+      return montant;
     });
   }
 }

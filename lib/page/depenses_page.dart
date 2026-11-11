@@ -7,6 +7,8 @@ import 'package:gestionyobs/modules/depense.dart';
 import 'package:gestionyobs/form/depense_form_page.dart';
 import 'package:gestionyobs/rapport/rapport.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
+import 'package:gestionyobs/modules/annulation.dart';
+import 'package:gestionyobs/app/messages_app.dart';
 
 class DepensesPage extends StatefulWidget {
   const DepensesPage({super.key});
@@ -94,6 +96,30 @@ class _DepensesPageState extends State<DepensesPage> {
       MaterialPageRoute(builder: (_) => const DepenseFormPage()),
     );
     _charger();
+  }
+
+  Future<void> _annuler(DepenseResume d) async {
+    final motif = await showDialog<String>(
+      context: context,
+      builder: (_) => MotifAnnulationDialog(
+        titre: 'Annuler la dépense ${d.code} ?',
+        avertissement:
+            '${d.libelle} : ${formaterPrix(d.montant)}. '
+            'La dépense ne comptera plus dans les totaux et les rapports. '
+            'Cette action est définitive.',
+      ),
+    );
+    if (motif == null || !mounted) return;
+
+    try {
+      await DatabaseService.annulerDepense(d.id, motif);
+      if (!mounted) return;
+      MessagesApp.afficher('Dépense annulée');
+      _charger(); // le nom de ta méthode de rechargement
+    } catch (e) {
+      if (!mounted) return;
+      MessagesApp.afficher(e.toString().replaceFirst('Exception: ', ''));
+    }
   }
 
   int _total(String? type) => _depenses
@@ -295,12 +321,50 @@ class _DepensesPageState extends State<DepensesPage> {
                                   ].join(' · '),
                                 ].join('\n'),
                               ),
-                              trailing: Text(
-                                formaterPrix(d.montant),
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min, // Très important pour éviter les erreurs de débordement de largeur
+                                children: [
+                                  // 1. Bouton d'annulation (si la dépense est valide et qu'on a le droit)
+                                  if (d.statut == 'valide' &&
+                                      Session.peut('depenses.annuler'))
+                                    IconButton(
+                                      icon: const Icon(
+                                        Icons.cancel_outlined,
+                                        color: Colors.red,
+                                      ),
+                                      tooltip: 'Annuler cette dépense',
+                                      onPressed: () => _annuler(d),
+                                    ),
+
+                                  // 2. Affichage du montant et du statut
+                                  Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    children: [
+                                      Text(
+                                        formaterPrix(d.montant),
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          decoration: d.statut == 'annule'
+                                              ? TextDecoration.lineThrough
+                                              : null,
+                                          color: d.statut == 'annule'
+                                              ? Colors.grey
+                                              : null,
+                                        ),
+                                      ),
+                                      if (d.statut == 'annule')
+                                        const Text(
+                                          'Annulée',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.red,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ],
                               ),
                             ),
                           );

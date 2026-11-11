@@ -19,6 +19,7 @@ class DepenseResume {
   final String? piece;
   final String? mode;
   final String utilisateur;
+  final String statut; // 'valide' ou 'annule'
 
   const DepenseResume({
     required this.id,
@@ -33,6 +34,7 @@ class DepenseResume {
     required this.piece,
     required this.mode,
     required this.utilisateur,
+    required this.statut,
   });
 
   factory DepenseResume.fromMap(Map<String, Object?> m) => DepenseResume(
@@ -48,5 +50,6 @@ class DepenseResume {
     piece: m['piece'] as String?,
     mode: m['mode'] as String?,
     utilisateur: m['utilisateur'] as String,
+    statut: (m['statut'] as String?) ?? 'valide',
   );
 }
