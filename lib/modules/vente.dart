@@ -1,5 +1,6 @@
 import 'achat.dart';
 import 'stock.dart';
+import 'annulation.dart';
 
 /// Une ligne saisie à la caisse.
 class LigneVenteSaisie {
@@ -168,6 +169,7 @@ class VenteDetail {
   final int nbImpressions;
   final List<LigneVente> lignes;
   final List<PaiementVente> paiements;
+  final InfoAnnulation? annulation;
 
   const VenteDetail({
     required this.code,
@@ -187,6 +189,7 @@ class VenteDetail {
     required this.nbImpressions,
     required this.lignes,
     required this.paiements,
+    this.annulation,
   });
 
   int get paye => paiements.fold(0, (somme, p) => somme + p.montant);

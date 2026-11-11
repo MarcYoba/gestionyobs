@@ -16,22 +16,33 @@ class InfoAnnulation {
 }
 
 /// Bandeau rouge affiché en haut d'un document annulé.
+/// Bandeau rouge affiché en haut d'un document annulé.
 class BandeauAnnulation extends StatelessWidget {
   final InfoAnnulation info;
+  final String? titre; // <-- 1. Ajouter le champ optionnel
 
-  const BandeauAnnulation({super.key, required this.info});
+  const BandeauAnnulation({
+    super.key,
+    required this.info,
+    this.titre, // <-- 2. L'ajouter dans le constructeur
+  });
 
   @override
   Widget build(BuildContext context) {
+    // 3. Utiliser le titre personnalisé s'il existe, sinon le texte par défaut
+    final texteTitre =
+        titre ??
+        'ANNULÉE le ${formaterDateHeure(info.date)} par ${info.utilisateur}';
+
     return Card(
       color: Colors.red.shade50,
       child: ListTile(
-        leading: Icon(Icons.cancel, color: Colors.red.shade800),
+        leading: const Icon(Icons.cancel, color: Colors.red),
         title: Text(
-          'ANNULÉE le ${formaterDateHeure(info.date)} par ${info.utilisateur}',
-          style: TextStyle(
+          texteTitre,
+          style: const TextStyle(
             fontWeight: FontWeight.bold,
-            color: Colors.red.shade800,
+            color: Colors.red,
           ),
         ),
         subtitle: Text('Motif : ${info.motif}'),

@@ -41,6 +41,7 @@ class _ApresConnexionPageState extends State<ApresConnexionPage> {
         // Un vendeur avec une seule agence y entre directement
         Session.agenceCourante = agences.first;
         //_aller(const HomePage());
+        _aller(const MainShell());
         MaterialPageRoute(builder: (_) => const MainShell());
       } else {
         // Dans les autres cas : liste de choix

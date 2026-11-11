@@ -18,6 +18,7 @@ import 'package:gestionyobs/page/sauvegardes_page.dart';
 import 'package:gestionyobs/page/licence_page.dart';
 import 'package:gestionyobs/page/rapports_page.dart';
 import 'package:gestionyobs/page/depenses_page.dart';
+import 'package:gestionyobs/page/transferts_page.dart';
 
 import 'package:gestionyobs/controller/utilisateurs_page.dart';
 
@@ -116,6 +117,19 @@ List<ModuleApp> construireModules() {
         'comptabilite.gerer',
       ],
       ouvrir: (_) => const ClassesArticlesPage(),
+    ),
+    ModuleApp(
+      titre: 'Transferts',
+      description: 'Transferts de stock entre agences',
+      icone: Icons.compare_arrows,
+      permissions: [
+        'transferts.voir',
+        'transferts.demander',
+        'transferts.valider',
+        'transferts.expedier',
+        'transferts.recevoir',
+      ],
+      ouvrir: (_) => const TransfertsPage(),
     ),
     ModuleApp(
       titre: 'Clients',

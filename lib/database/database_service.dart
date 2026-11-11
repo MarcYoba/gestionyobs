@@ -22,6 +22,7 @@ import 'package:gestionyobs/modules/reglement.dart';
 import 'package:gestionyobs/modules/annulation.dart';
 import 'package:gestionyobs/rapport/rapport.dart';
 import 'package:gestionyobs/modules/depense.dart';
+import 'package:gestionyobs/modules/transfert.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -59,7 +60,9 @@ class DatabaseService {
   // Version 16 : annulation des ventes et des achats.
   //static const int _versionBase = 16;
   // Version 16 : dépenses (salaires, charges, autres dépenses).
-  static const int _versionBase = 17;
+  //static const int _versionBase = 17;
+  // Version 18 : transferts de stock entre agences.
+  static const int _versionBase = 18;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -102,6 +105,7 @@ class DatabaseService {
           await _creerTablesReglements(db);
           await _migrerAnnulations(db);
           await _creerTableDepenses(db);
+          await _creerTablesTransferts(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -154,6 +158,9 @@ class DatabaseService {
           }
           if (ancienneVersion < 17) {
             await _creerTableDepenses(db);
+          }
+          if (ancienneVersion < 18) {
+            await _creerTablesTransferts(db);
           }
         },
       ),
@@ -4719,5 +4726,741 @@ class DatabaseService {
     ''', args);
 
     return lignes.map(DepenseResume.fromMap).toList();
+  }
+
+  // ---------- Transferts entre agences ----------
+
+  static Future<void> _creerTablesTransferts(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS transferts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        agence_demandeuse_id INTEGER NOT NULL,
+        agence_source_id INTEGER NOT NULL,
+        statut TEXT NOT NULL DEFAULT 'demande',
+        note TEXT,
+        demande_par INTEGER NOT NULL,
+        demande_le TEXT NOT NULL,
+        decision_par INTEGER,
+        decision_le TEXT,
+        motif_refus TEXT,
+        expedie_par INTEGER,
+        expedie_le TEXT,
+        recu_par INTEGER,
+        recu_le TEXT,
+        note_reception TEXT,
+        annule_par INTEGER,
+        annule_le TEXT,
+        motif_annulation TEXT,
+        FOREIGN KEY (agence_demandeuse_id) REFERENCES agences(id),
+        FOREIGN KEY (agence_source_id) REFERENCES agences(id),
+        FOREIGN KEY (demande_par) REFERENCES utilisateurs(id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_transferts_source ON transferts (agence_source_id, statut)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_transferts_demandeuse ON transferts (agence_demandeuse_id, statut)',
+    );
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS transfert_lignes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transfert_id INTEGER NOT NULL,
+        article_id INTEGER NOT NULL,
+        code_article TEXT NOT NULL,
+        designation TEXT NOT NULL,
+        unite TEXT NOT NULL,
+        quantite_demandee REAL NOT NULL,
+        quantite_acceptee REAL,
+        quantite_expediee REAL,
+        quantite_recue REAL,
+        FOREIGN KEY (transfert_id) REFERENCES transferts(id) ON DELETE CASCADE,
+        FOREIGN KEY (article_id) REFERENCES articles(id)
+      )
+    ''');
+  }
+
+  static Agence _agenceObligatoire() {
+    final a = Session.agenceCourante;
+    if (a == null) throw Exception('Aucune agence sélectionnée');
+    return a;
+  }
+
+  static void _exigerVueTransferts() {
+    if (!Session.peut('transferts.voir') &&
+        !Session.peut('transferts.demander') &&
+        !Session.peut('transferts.valider') &&
+        !Session.peut('transferts.expedier') &&
+        !Session.peut('transferts.recevoir')) {
+      throw Exception('Action non autorisée');
+    }
+  }
+
+  // Un texte obligatoire (motif de refus, par exemple)
+  static String _texteObligatoire(String texte, String message) {
+    final propre = texte.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (propre.length < 5) throw Exception(message);
+    return propre;
+  }
+
+  // Retrouve un transfert et vérifie : la bonne agence, la bonne étape
+  // role : 'source' (l'agence qui envoie) ou 'demandeuse' (celle qui reçoit)
+  static Future<Map<String, Object?>> _transfertPourAction(
+    DatabaseExecutor executeur,
+    int id, {
+    required int agenceId,
+    required String role,
+    required String statut,
+  }) async {
+    final r = await executeur.query(
+      'transferts',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (r.isEmpty) throw Exception('Transfert introuvable');
+    final t = r.first;
+
+    final colonne = role == 'source'
+        ? 'agence_source_id'
+        : 'agence_demandeuse_id';
+    if (t[colonne] != agenceId) {
+      throw Exception(
+        role == 'source'
+            ? "Cette action revient à l'agence qui envoie la marchandise"
+            : "Cette action revient à l'agence qui reçoit la marchandise",
+      );
+    }
+    if (t['statut'] != statut) {
+      throw Exception(
+        "Ce transfert n'est plus à cette étape "
+        '(statut : ${statutsTransfert[t['statut']] ?? t['statut']})',
+      );
+    }
+    return t;
+  }
+
+  // Les autres agences, pour choisir celle à qui on demande
+  static Future<List<Agence>> agencesPourTransfert() async {
+    Session.exiger('transferts.demander');
+    final agence = _agenceObligatoire();
+
+    final lignes = await db.query(
+      'agences',
+      where: 'actif = 1 AND id != ?',
+      whereArgs: [agence.id],
+      orderBy: 'nom COLLATE NOCASE',
+    );
+    return lignes.map(Agence.fromMap).toList();
+  }
+
+  // Les articles proposés, avec le stock de l'agence qui enverrait
+  static Future<List<ArticleCaisse>> rechercherArticlesTransfert(
+    String recherche,
+    int agenceSourceId,
+  ) async {
+    Session.exiger('transferts.demander');
+
+    final args = <Object>[agenceSourceId];
+    var filtre = '';
+    final texte = recherche.trim();
+    if (texte.isNotEmpty) {
+      filtre = 'AND (a.code LIKE ? OR a.designation LIKE ? OR cl.nom LIKE ?)';
+      args.addAll(['%$texte%', '%$texte%', '%$texte%']);
+    }
+
+    final lignes = await db.rawQuery('''
+      SELECT a.id, a.code, a.designation, cl.nom AS categorie, a.unite,
+             a.prix_vente, COALESCE(s.quantite, 0) AS stock
+      FROM articles a
+      LEFT JOIN classes_articles cl ON cl.id = a.classe_id
+      LEFT JOIN stock s ON s.article_id = a.id AND s.agence_id = ?
+      WHERE a.actif = 1 $filtre
+      ORDER BY a.designation COLLATE NOCASE
+      LIMIT 50
+    ''', args);
+
+    return lignes.map(ArticleCaisse.fromMap).toList();
+  }
+
+  // Étape 1 : l'agence courante demande de la marchandise à une autre
+  static Future<String> creerDemandeTransfert({
+    required int agenceSourceId,
+    String? note,
+    required List<LigneTransfertSaisie> lignes,
+  }) async {
+    Session.exiger('transferts.demander');
+    final agence = _agenceObligatoire();
+    final utilisateur = Session.utilisateurCourant!;
+
+    if (agenceSourceId == agence.id) {
+      throw Exception('Choisissez une autre agence que la vôtre');
+    }
+    if (lignes.isEmpty) throw Exception('Ajoutez au moins un article');
+
+    // Une seule ligne par article
+    final fusion = <int, double>{};
+    for (final l in lignes) {
+      final q = _arrondir(l.quantite);
+      if (q <= 0)
+        throw Exception('Chaque quantité doit être supérieure à zéro');
+      fusion[l.articleId] = _arrondir((fusion[l.articleId] ?? 0) + q);
+    }
+
+    return db.transaction((txn) async {
+      final source = await txn.query(
+        'agences',
+        columns: ['actif'],
+        where: 'id = ?',
+        whereArgs: [agenceSourceId],
+        limit: 1,
+      );
+      if (source.isEmpty || source.first['actif'] != 1) {
+        throw Exception('Agence introuvable');
+      }
+
+      final code = await _prochainMatricule(txn, 'transferts');
+      final maintenant = DateTime.now().toIso8601String();
+      final transfertId = await txn.insert('transferts', {
+        'code': code,
+        'agence_demandeuse_id': agence.id,
+        'agence_source_id': agenceSourceId,
+        'statut': 'demande',
+        'note': _videEnNull(note),
+        'demande_par': utilisateur.id,
+        'demande_le': maintenant,
+      });
+
+      for (final e in fusion.entries) {
+        final a = await txn.query(
+          'articles',
+          columns: ['code', 'designation', 'unite', 'actif'],
+          where: 'id = ?',
+          whereArgs: [e.key],
+          limit: 1,
+        );
+        if (a.isEmpty) throw Exception('Article introuvable');
+        if (a.first['actif'] != 1) {
+          throw Exception('« ${a.first['designation']} » est désactivé');
+        }
+
+        await txn.insert('transfert_lignes', {
+          'transfert_id': transfertId,
+          'article_id': e.key,
+          'code_article': a.first['code'],
+          'designation': a.first['designation'],
+          'unite': a.first['unite'],
+          'quantite_demandee': e.value,
+        });
+      }
+
+      return code;
+    });
+  }
+
+  // Les transferts de l'agence courante
+  // vue : 'demandes' (ceux qu'elle a demandés) ou 'a_traiter' (ceux qu'on lui demande)
+  static Future<List<TransfertResume>> listerTransferts({
+    required String vue,
+  }) async {
+    _exigerVueTransferts();
+    final agence = _agenceObligatoire();
+
+    final colonne = switch (vue) {
+      'demandes' => 't.agence_demandeuse_id',
+      'a_traiter' => 't.agence_source_id',
+      _ => throw Exception('Vue inconnue'),
+    };
+
+    final lignes = await db.rawQuery(
+      '''
+      SELECT t.id, t.code, t.statut, t.demande_le,
+             src.nom AS source, dem.nom AS demandeuse,
+             (SELECT COUNT(*) FROM transfert_lignes l WHERE l.transfert_id = t.id) AS nb
+      FROM transferts t
+      INNER JOIN agences src ON src.id = t.agence_source_id
+      INNER JOIN agences dem ON dem.id = t.agence_demandeuse_id
+      WHERE $colonne = ?
+      ORDER BY t.id DESC
+      LIMIT 300
+    ''',
+      [agence.id],
+    );
+
+    return lignes.map(TransfertResume.fromMap).toList();
+  }
+
+  // Ce qui attend l'agence courante
+  static Future<Map<String, int>> compteursTransferts() async {
+    _exigerVueTransferts();
+    final agence = _agenceObligatoire();
+
+    Future<int> compter(String condition) async {
+      final r = await db.rawQuery(
+        'SELECT COUNT(*) AS n FROM transferts WHERE $condition',
+        [agence.id],
+      );
+      return (r.first['n'] as num).toInt();
+    }
+
+    return {
+      'avalider': await compter("agence_source_id = ? AND statut = 'demande'"),
+      'aexpedier': await compter("agence_source_id = ? AND statut = 'accepte'"),
+      'areceptionner': await compter(
+        "agence_demandeuse_id = ? AND statut = 'expedie'",
+      ),
+    };
+  }
+
+  static InfoAnnulation? annulationDepuis(Map<String, dynamic> e) {
+    if (e['statut'] != 'annule') return null;
+    return InfoAnnulation(
+      date: DateTime.parse(e['annule_le'] as String),
+      utilisateur:
+          e['annule_par_nom'] ??
+          'Inconnu', // Ou adaptez selon vos jointures utilisateurs
+      motif: e['motif_annulation'] as String? ?? '',
+    );
+  }
+
+  static Future<TransfertDetail> detailTransfert(int id) async {
+    _exigerVueTransferts();
+    final agence = _agenceObligatoire();
+
+    final entete = await db.rawQuery(
+      '''
+      SELECT t.id, t.code, t.statut, t.note, t.agence_source_id, t.agence_demandeuse_id,
+             t.demande_le, t.decision_le, t.motif_refus, t.expedie_le, t.recu_le,
+             t.note_reception, t.annule_le, t.motif_annulation,
+             src.nom AS source, dem.nom AS demandeuse,
+             up.nom_complet AS demande_par, ud.nom_complet AS decision_par,
+             ue.nom_complet AS expedie_par, ur.nom_complet AS recu_par,
+             ua.nom_complet AS annule_par
+      FROM transferts t
+      INNER JOIN agences src ON src.id = t.agence_source_id
+      INNER JOIN agences dem ON dem.id = t.agence_demandeuse_id
+      INNER JOIN utilisateurs up ON up.id = t.demande_par
+      LEFT JOIN utilisateurs ud ON ud.id = t.decision_par
+      LEFT JOIN utilisateurs ue ON ue.id = t.expedie_par
+      LEFT JOIN utilisateurs ur ON ur.id = t.recu_par
+      LEFT JOIN utilisateurs ua ON ua.id = t.annule_par
+      WHERE t.id = ? AND (t.agence_source_id = ? OR t.agence_demandeuse_id = ?)
+    ''',
+      [id, agence.id, agence.id],
+    );
+    if (entete.isEmpty) throw Exception('Transfert introuvable');
+
+    final lignes = await db.query(
+      'transfert_lignes',
+      where: 'transfert_id = ?',
+      whereArgs: [id],
+      orderBy: 'id',
+    );
+
+    final e = entete.first;
+    DateTime? date(Object? v) => v == null ? null : DateTime.parse(v as String);
+
+    return TransfertDetail(
+      id: e['id'] as int,
+      code: e['code'] as String,
+      statut: e['statut'] as String,
+      sourceId: e['agence_source_id'] as int,
+      source: e['source'] as String,
+      demandeuseId: e['agence_demandeuse_id'] as int,
+      demandeuse: e['demandeuse'] as String,
+      note: e['note'] as String?,
+      demandePar: e['demande_par'] as String,
+      demandeLe: DateTime.parse(e['demande_le'] as String),
+      decisionPar: e['decision_par'] as String?,
+      decisionLe: date(e['decision_le']),
+      motifRefus: e['motif_refus'] as String?,
+      expediePar: e['expedie_par'] as String?,
+      expedieLe: date(e['expedie_le']),
+      recuPar: e['recu_par'] as String?,
+      recuLe: date(e['recu_le']),
+      noteReception: e['note_reception'] as String?,
+      annulation: annulationDepuis(e),
+      lignes: lignes.map(LigneTransfert.fromMap).toList(),
+    );
+  }
+
+  // Étape 2 : l'agence source accepte (quantités ajustables) ou refuse
+  static Future<void> repondreTransfert({
+    required int id,
+    required bool accepte,
+    List<QuantiteLigneSaisie> quantites = const [],
+    String? motifRefus,
+  }) async {
+    Session.exiger('transferts.valider');
+    final agence = _agenceObligatoire();
+    final utilisateur = Session.utilisateurCourant!;
+
+    await db.transaction((txn) async {
+      await _transfertPourAction(
+        txn,
+        id,
+        agenceId: agence.id,
+        role: 'source',
+        statut: 'demande',
+      );
+      final maintenant = DateTime.now().toIso8601String();
+
+      if (!accepte) {
+        final raison = _texteObligatoire(
+          motifRefus ?? '',
+          'Indiquez le motif du refus (5 caractères minimum)',
+        );
+        await txn.update(
+          'transfert_lignes',
+          {'quantite_acceptee': 0},
+          where: 'transfert_id = ?',
+          whereArgs: [id],
+        );
+        await txn.update(
+          'transferts',
+          {
+            'statut': 'refuse',
+            'decision_par': utilisateur.id,
+            'decision_le': maintenant,
+            'motif_refus': raison,
+          },
+          where: 'id = ?',
+          whereArgs: [id],
+        );
+        return;
+      }
+
+      final lignes = await txn.query(
+        'transfert_lignes',
+        where: 'transfert_id = ?',
+        whereArgs: [id],
+      );
+      final parLigne = {
+        for (final q in quantites) q.ligneId: _arrondir(q.quantite),
+      };
+
+      var total = 0.0;
+      for (final l in lignes) {
+        final q = parLigne[l['id'] as int];
+        if (q == null) {
+          throw Exception('Quantité manquante pour « ${l['designation']} »');
+        }
+        final demandee = (l['quantite_demandee'] as num).toDouble();
+        if (q < 0 || q > demandee) {
+          throw Exception(
+            '« ${l['designation']} » : la quantité acceptée doit être '
+            'comprise entre 0 et ${formaterQuantite(demandee)}',
+          );
+        }
+        total += q;
+        await txn.update(
+          'transfert_lignes',
+          {'quantite_acceptee': q},
+          where: 'id = ?',
+          whereArgs: [l['id']],
+        );
+      }
+      if (total <= 0) {
+        throw Exception(
+          'Acceptez au moins une quantité, ou refusez la demande',
+        );
+      }
+
+      await txn.update(
+        'transferts',
+        {
+          'statut': 'accepte',
+          'decision_par': utilisateur.id,
+          'decision_le': maintenant,
+        },
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    });
+  }
+
+  // Étape 3 : l'agence source expédie. Son stock baisse.
+  static Future<void> expedierTransfert({
+    required int id,
+    required List<QuantiteLigneSaisie> quantites,
+  }) async {
+    Session.exiger('transferts.expedier');
+    final agence = _agenceObligatoire();
+    final utilisateur = Session.utilisateurCourant!;
+
+    await db.transaction((txn) async {
+      final t = await _transfertPourAction(
+        txn,
+        id,
+        agenceId: agence.id,
+        role: 'source',
+        statut: 'accepte',
+      );
+
+      final lignes = await txn.query(
+        'transfert_lignes',
+        where: 'transfert_id = ?',
+        whereArgs: [id],
+        orderBy: 'id',
+      );
+      final destination = await txn.query(
+        'agences',
+        columns: ['nom'],
+        where: 'id = ?',
+        whereArgs: [t['agence_demandeuse_id']],
+        limit: 1,
+      );
+      final nomDestination = destination.isEmpty
+          ? ''
+          : (destination.first['nom'] as String);
+      final parLigne = {
+        for (final q in quantites) q.ligneId: _arrondir(q.quantite),
+      };
+
+      // Les quantités
+      var total = 0.0;
+      for (final l in lignes) {
+        final q = parLigne[l['id'] as int];
+        if (q == null) {
+          throw Exception('Quantité manquante pour « ${l['designation']} »');
+        }
+        final acceptee = (l['quantite_acceptee'] as num?)?.toDouble() ?? 0;
+        if (q < 0 || q > acceptee) {
+          throw Exception(
+            '« ${l['designation']} » : la quantité expédiée doit être '
+            'comprise entre 0 et ${formaterQuantite(acceptee)}',
+          );
+        }
+        total += q;
+      }
+      if (total <= 0) {
+        throw Exception('Expédiez au moins une quantité supérieure à zéro');
+      }
+
+      // Le stock de l'agence, vérifié avant d'écrire quoi que ce soit
+      for (final l in lignes) {
+        final q = parLigne[l['id'] as int]!;
+        if (q <= 0) continue;
+        final s = await txn.query(
+          'stock',
+          columns: ['quantite'],
+          where: 'article_id = ? AND agence_id = ?',
+          whereArgs: [l['article_id'], agence.id],
+          limit: 1,
+        );
+        final dispo = s.isEmpty ? 0.0 : (s.first['quantite'] as num).toDouble();
+        if (q > dispo) {
+          throw Exception(
+            'Stock insuffisant pour « ${l['designation']} » '
+            '(disponible : ${formaterQuantite(dispo)}, à expédier : ${formaterQuantite(q)})',
+          );
+        }
+      }
+
+      for (final l in lignes) {
+        final q = parLigne[l['id'] as int]!;
+        await txn.update(
+          'transfert_lignes',
+          {'quantite_expediee': q},
+          where: 'id = ?',
+          whereArgs: [l['id']],
+        );
+        if (q > 0) {
+          await _mouvementStock(
+            txn,
+            articleId: l['article_id'] as int,
+            agenceId: agence.id,
+            utilisateurId: utilisateur.id,
+            type: 'sortie',
+            quantite: q,
+            motif: 'Transfert vers $nomDestination',
+            commentaire: 'Transfert ${t['code']}',
+            sourceType: 'transfert_sortie',
+            sourceId: id,
+          );
+        }
+      }
+
+      await txn.update(
+        'transferts',
+        {
+          'statut': 'expedie',
+          'expedie_par': utilisateur.id,
+          'expedie_le': DateTime.now().toIso8601String(),
+        },
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    });
+  }
+
+  // Étape 4 : l'agence demandeuse réceptionne. Son stock augmente.
+  static Future<void> receptionnerTransfert({
+    required int id,
+    required List<QuantiteLigneSaisie> quantites,
+    String? note,
+  }) async {
+    Session.exiger('transferts.recevoir');
+    final agence = _agenceObligatoire();
+    final utilisateur = Session.utilisateurCourant!;
+
+    await db.transaction((txn) async {
+      final t = await _transfertPourAction(
+        txn,
+        id,
+        agenceId: agence.id,
+        role: 'demandeuse',
+        statut: 'expedie',
+      );
+
+      final lignes = await txn.query(
+        'transfert_lignes',
+        where: 'transfert_id = ?',
+        whereArgs: [id],
+        orderBy: 'id',
+      );
+      final origine = await txn.query(
+        'agences',
+        columns: ['nom'],
+        where: 'id = ?',
+        whereArgs: [t['agence_source_id']],
+        limit: 1,
+      );
+      final nomSource = origine.isEmpty ? '' : (origine.first['nom'] as String);
+      final parLigne = {
+        for (final q in quantites) q.ligneId: _arrondir(q.quantite),
+      };
+
+      // Les quantités, et l'écart éventuel
+      var ecart = false;
+      for (final l in lignes) {
+        final q = parLigne[l['id'] as int];
+        if (q == null) {
+          throw Exception('Quantité manquante pour « ${l['designation']} »');
+        }
+        final expediee = (l['quantite_expediee'] as num?)?.toDouble() ?? 0;
+        if (q < 0 || q > expediee) {
+          throw Exception(
+            '« ${l['designation']} » : la quantité reçue doit être '
+            'comprise entre 0 et ${formaterQuantite(expediee)}',
+          );
+        }
+        if ((q - expediee).abs() > 0.0005) ecart = true;
+      }
+
+      final noteTexte = _videEnNull(note);
+      if (ecart && (noteTexte == null || noteTexte.length < 5)) {
+        throw Exception(
+          'Une note est obligatoire en cas d\'écart '
+          '(casse, perte...) : 5 caractères minimum',
+        );
+      }
+
+      for (final l in lignes) {
+        final q = parLigne[l['id'] as int]!;
+        await txn.update(
+          'transfert_lignes',
+          {'quantite_recue': q},
+          where: 'id = ?',
+          whereArgs: [l['id']],
+        );
+        if (q > 0) {
+          await _mouvementStock(
+            txn,
+            articleId: l['article_id'] as int,
+            agenceId: agence.id,
+            utilisateurId: utilisateur.id,
+            type: 'entree',
+            quantite: q,
+            motif: 'Transfert depuis $nomSource',
+            commentaire: 'Transfert ${t['code']}',
+            sourceType: 'transfert_entree',
+            sourceId: id,
+            ignorerInactif: true,
+          );
+        }
+      }
+
+      await txn.update(
+        'transferts',
+        {
+          'statut': 'recu',
+          'recu_par': utilisateur.id,
+          'recu_le': DateTime.now().toIso8601String(),
+          'note_reception': noteTexte,
+        },
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    });
+  }
+
+  static String _motifAnnulation(String motif) {
+    final propre = motif.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (propre.length < 5) {
+      throw Exception(
+        "Indiquez le motif de l'annulation (5 caractères minimum)",
+      );
+    }
+    return propre;
+  }
+
+  static Future<void> _marquerAnnule(
+    DatabaseExecutor executeur,
+    String table,
+    int id,
+    int utilisateurId,
+    String motif,
+  ) async {
+    await executeur.update(
+      table,
+      {
+        'statut': 'annule',
+        'annule_le': DateTime.now().toIso8601String(),
+        'annule_par': utilisateurId,
+        'motif_annulation': motif,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  // Annulation : possible avant l'expédition, par l'une ou l'autre agence
+  static Future<void> annulerTransfert(int id, String motif) async {
+    final agence = _agenceObligatoire();
+    final utilisateur = Session.utilisateurCourant!;
+
+    final raison = _motifAnnulation(motif);
+
+    await db.transaction((txn) async {
+      final r = await txn.query(
+        'transferts',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (r.isEmpty) throw Exception('Transfert introuvable');
+      final t = r.first;
+
+      if (t['statut'] != 'demande' && t['statut'] != 'accepte') {
+        throw Exception(
+          'Un transfert expédié ne peut plus être annulé : réceptionnez-le',
+        );
+      }
+
+      // L'agence demandeuse a besoin du droit de demander ;
+      // l'agence source, du droit de valider
+      if (t['agence_demandeuse_id'] == agence.id) {
+        Session.exiger('transferts.demander');
+      } else if (t['agence_source_id'] == agence.id) {
+        Session.exiger('transferts.valider');
+      } else {
+        throw Exception('Transfert introuvable');
+      }
+
+      await _marquerAnnule(txn, 'transferts', id, utilisateur.id, raison);
+    });
   }
 }
