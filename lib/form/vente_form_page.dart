@@ -12,6 +12,7 @@ import 'package:gestionyobs/modules/vente.dart';
 import 'package:gestionyobs/page/vente_detail_page.dart';
 import 'package:gestionyobs/config_service.dart';
 import 'package:gestionyobs/service/ticket_service.dart';
+import 'package:gestionyobs/dialog/client_selecteur_dialog.dart';
 
 // Une ligne du panier
 class _LigneCaisse {
@@ -67,9 +68,11 @@ class _VenteFormPageState extends State<VenteFormPage> {
   final List<_LigneCaisse> _lignes = [];
   final List<_PaiementCaisse> _paiements = [];
 
-  List<Tiers> _clients = [];
+  //List<Tiers> _clients = [];
   List<ModePaiement> _modes = [];
-  int? _clientId;
+  //int? _clientId;
+  Tiers? _client; // le client choisi
+  Tiers? _clientComptant; // le client par défaut
   SituationClient? _situation;
   bool _pret = false;
   bool _chargement = false;
@@ -116,11 +119,10 @@ class _VenteFormPageState extends State<VenteFormPage> {
       final modes = await DatabaseService.listerModesPaiement();
       if (!mounted) return;
       setState(() {
-        _clients = clients;
+        // Le client comptant est toujours en tête de liste
+        _clientComptant = clients.isEmpty ? null : clients.first;
+        _client = _clientComptant;
         _modes = modes;
-        _clientId = clients.isEmpty
-            ? null
-            : clients.first.id; // le client comptant
         _pret = true;
       });
     } catch (e) {
@@ -137,24 +139,31 @@ class _VenteFormPageState extends State<VenteFormPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) => liberer());
   }
 
-  Future<void> _changerClient(int? id) async {
+  Future<void> _changerClient(Tiers client) async {
     setState(() {
-      _clientId = id;
+      _client = client;
       _situation = null;
     });
-    if (id == null) return;
-
-    final client = _clients.firstWhere((c) => c.id == id);
     if (client.systeme) return;
 
     try {
-      final s = await DatabaseService.situationClient(id);
-      if (!mounted || _clientId != id) return;
+      final s = await DatabaseService.situationClient(client.id);
+      if (!mounted || _client?.id != client.id) return;
       setState(() => _situation = s);
     } catch (_) {
       // la situation est une aide : on ignore une erreur de lecture
     }
   }
+
+  Future<void> _choisirClient({bool creation = false}) async {
+    final choix = await showDialog<Tiers>(
+      context: context,
+      builder: (_) => ClientSelecteurDialog(creation: creation),
+    );
+    if (choix != null) await _changerClient(choix);
+  }
+
+  Future<void> _nouveauClient() => _choisirClient(creation: true);
 
   Future<void> _ajouterArticle() async {
     final article = await showDialog<ArticleCaisse>(
@@ -219,7 +228,8 @@ class _VenteFormPageState extends State<VenteFormPage> {
       _lignes.clear();
       _paiements.clear();
       _noteController.clear();
-      _clientId = _clients.isEmpty ? null : _clients.first.id;
+      //_clientId = _clients.isEmpty ? null : _clients.first.id;
+      _client = _clientComptant;
       _situation = null;
       _erreur = null;
       _chargement = false;
@@ -238,7 +248,8 @@ class _VenteFormPageState extends State<VenteFormPage> {
     void echec(String message) => setState(() => _erreur = message);
     setState(() => _erreur = null);
 
-    if (_clientId == null) return echec('Choisissez un client');
+    //if (_clientId == null) return echec('Choisissez un client');
+    if (_client == null) return echec('Choisissez un client');
     if (_lignes.isEmpty) return echec('Ajoutez au moins un article');
 
     for (final l in _lignes) {
@@ -298,7 +309,7 @@ class _VenteFormPageState extends State<VenteFormPage> {
     setState(() => _chargement = true);
     try {
       final vente = await DatabaseService.creerVente(
-        clientId: _clientId!,
+        clientId: _client!.id,
         note: _noteController.text,
         lignes: _lignes
             .map(
@@ -441,7 +452,9 @@ class _VenteFormPageState extends State<VenteFormPage> {
   }
 
   Widget _carteClient() {
+    final c = _client;
     final s = _situation;
+    final identifie = c != null && !c.systeme;
 
     return Card(
       child: Padding(
@@ -449,20 +462,78 @@ class _VenteFormPageState extends State<VenteFormPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            DropdownButtonFormField<int>(
-              initialValue: _clientId,
-              isExpanded: true,
-              decoration: _champ('Client'),
-              items: _clients
-                  .map((c) => DropdownMenuItem(value: c.id, child: Text(c.nom)))
-                  .toList(),
-              onChanged: _changerClient,
+            Row(
+              children: [
+                Icon(
+                  identifie ? Icons.person : Icons.person_outline,
+                  size: 40,
+                  color: Colors.green,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        c?.nom ?? 'Aucun client',
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      if (c != null && !c.systeme)
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.phone,
+                              size: 16,
+                              color: Colors.black54,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              c.telephone ?? 'Téléphone non renseigné',
+                              style: const TextStyle(color: Colors.black54),
+                            ),
+                          ],
+                        )
+                      else
+                        const Text(
+                          'Vente comptant, sans identification du client',
+                          style: TextStyle(color: Colors.black54),
+                        ),
+                    ],
+                  ),
+                ),
+                if (identifie)
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    tooltip: 'Revenir au client comptant',
+                    onPressed: () => _changerClient(_clientComptant!),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _choisirClient,
+                  icon: const Icon(Icons.search),
+                  label: const Text('Chercher un client'),
+                ),
+                FilledButton.tonalIcon(
+                  onPressed: _nouveauClient,
+                  icon: const Icon(Icons.person_add),
+                  label: const Text('Nouveau client'),
+                ),
+              ],
             ),
             if (s != null) ...[
               const SizedBox(height: 8),
               Text(
                 s.plafond == 0
-                    ? 'Ce client n\'a pas de crédit autorisé (plafond 0).'
+                    ? "Ce client n'a pas de crédit autorisé (plafond 0)."
                     : 'Plafond : ${formaterPrix(s.plafond)} · '
                           'Déjà dû : ${formaterPrix(s.encours)} · '
                           'Disponible : ${formaterPrix(s.disponible < 0 ? 0 : s.disponible)}',

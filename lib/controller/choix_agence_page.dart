@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'creer_agence_page.dart';
-import 'home_page.dart';
+import 'main_shell.dart';
 
 import 'package:gestionyobs/security/login_page.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
@@ -16,7 +16,7 @@ class ChoixAgencePage extends StatelessWidget {
     Session.agenceCourante = agence;
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (_) => const HomePage()),
+      MaterialPageRoute(builder: (_) => const MainShell()),
     );
   }
 

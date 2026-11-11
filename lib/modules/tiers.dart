@@ -57,3 +57,11 @@ String droitTiers(String type, String action) =>
 bool peutVoirTiers(String type) =>
     Session.peut(droitTiers(type, 'voir')) ||
     Session.peut(droitTiers(type, 'gerer'));
+
+/// Le résultat de la création rapide d'un client à la caisse.
+class ResultatClientRapide {
+  final Tiers client;
+  final bool existant; // true : ce numéro appartenait déjà à ce client
+
+  const ResultatClientRapide({required this.client, required this.existant});
+}

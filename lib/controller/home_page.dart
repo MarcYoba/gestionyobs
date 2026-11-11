@@ -1,239 +1,28 @@
 import 'package:flutter/material.dart';
 
-import 'apres_connexion_page.dart';
-
-import 'package:gestionyobs/security/login_page.dart';
-import 'package:gestionyobs/modules/module_page.dart';
-import 'package:gestionyobs/permissions/roles_droits_page.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
-import 'package:gestionyobs/page/articles_page.dart';
-import 'package:gestionyobs/page/stock_page.dart';
-import 'package:gestionyobs/page/tiers_page.dart';
-import 'package:gestionyobs/page/modes_paiement_page.dart';
-import 'package:gestionyobs/page/plan_comptable_page.dart';
-import 'package:gestionyobs/page/associations_page.dart';
-import 'package:gestionyobs/page/classes_articles_page.dart';
-import 'package:gestionyobs/page/achats_page.dart';
-import 'package:gestionyobs/page/ventes_page.dart';
-import 'package:gestionyobs/page/impression_page.dart';
-import 'package:gestionyobs/page/reglements_page.dart';
 import 'package:gestionyobs/service/backup_service.dart';
-import 'package:gestionyobs/page/sauvegardes_page.dart';
-import 'package:gestionyobs/page/licence_page.dart';
 import 'package:gestionyobs/service/licence_service.dart';
-import 'package:gestionyobs/page/rapports_page.dart';
 
-import 'utilisateurs_page.dart';
-
-/// Un module de l'accueil : une carte qui ouvre une page.
-class _Module {
-  final String titre;
-  final String description;
-  final IconData icone;
-  final List<String> permissions; // il suffit d'en avoir une
-  final WidgetBuilder ouvrir; // construit la page à ouvrir
-
-  _Module({
-    required this.titre,
-    required this.description,
-    required this.icone,
-    required this.permissions,
-    required this.ouvrir,
-  });
-
-  bool get autorise => permissions.any(Session.peut);
-}
+import 'package:gestionyobs/app/modules_app.dart';
 
 class HomePage extends StatelessWidget {
-  const HomePage({super.key});
+  // Appelée quand on clique sur une carte : la coque ouvre le module
+  final void Function(ModuleApp) onOuvrir;
 
-  // Un module pas encore construit
-  _Module _bientot(
-    String titre,
-    String description,
-    IconData icone,
-    List<String> permissions,
-  ) {
-    return _Module(
-      titre: titre,
-      description: description,
-      icone: icone,
-      permissions: permissions,
-      ouvrir: (_) =>
-          ModulePage(titre: titre, icone: icone, permissions: permissions),
-    );
-  }
+  const HomePage({super.key, required this.onOuvrir});
 
   @override
   Widget build(BuildContext context) {
     final utilisateur = Session.utilisateurCourant!;
     final agence = Session.agenceCourante;
 
-    // La liste complète des modules du logiciel
-    final modules = <_Module>[
-      _Module(
-        titre: 'Rapports',
-        description: 'Par jour, semaine, mois, trimestre, semestre, année',
-        icone: Icons.bar_chart,
-        permissions: ['rapports.voir'],
-        ouvrir: (_) => const RapportsPage(),
-      ),
-      _Module(
-        titre: 'Ventes',
-        description: 'Caisse, factures et crédits',
-        icone: Icons.point_of_sale,
-        permissions: ['ventes.creer', 'ventes.voir'],
-        ouvrir: (_) => const VentesPage(),
-      ),
-      _Module(
-        titre: 'Règlements',
-        description: 'Créances clients et dettes fournisseurs',
-        icone: Icons.account_balance_wallet,
-        permissions: [
-          'reglements.voir',
-          'reglements.clients',
-          'reglements.fournisseurs',
-        ],
-        ouvrir: (_) => const ReglementsPage(),
-      ),
-      _Module(
-        titre: 'Impression',
-        description: 'Imprimante, papier 58 ou 80 mm, en-tête',
-        icone: Icons.print,
-        permissions: ['ventes.creer', 'ventes.voir', 'parametres.gerer'],
-        ouvrir: (_) => const ImpressionPage(),
-      ),
-      _Module(
-        titre: 'Articles',
-        description: 'Catalogue commun et prix',
-        icone: Icons.category,
-        permissions: ['articles.voir', 'articles.gerer'],
-        ouvrir: (_) => const ArticlesPage(),
-      ),
-      _Module(
-        titre: 'Stock',
-        description: "Stock de l'agence et mouvements",
-        icone: Icons.inventory_2,
-        permissions: ['stock.voir', 'stock.modifier', 'stock.ajuster'],
-        ouvrir: (_) => const StockPage(),
-      ),
-      _Module(
-        titre: 'Clients',
-        description: 'Fiches clients et plafond de crédit',
-        icone: Icons.groups,
-        permissions: ['clients.voir', 'clients.gerer'],
-        ouvrir: (_) => const TiersPage(type: 'client'),
-      ),
-      _Module(
-        titre: 'Fournisseurs',
-        description: 'Fiches fournisseurs',
-        icone: Icons.local_shipping,
-        permissions: ['fournisseurs.voir', 'fournisseurs.gerer'],
-        ouvrir: (_) => const TiersPage(type: 'fournisseur'),
-      ),
-      _Module(
-        titre: "Classes d'articles",
-        description: 'Familles de produits et comptes',
-        icone: Icons.category,
-        permissions: [
-          'articles.voir',
-          'articles.gerer',
-          'comptabilite.voir',
-          'comptabilite.gerer',
-        ],
-        ouvrir: (_) => const ClassesArticlesPage(),
-      ),
-      _Module(
-        titre: 'Achats',
-        description: 'Achats, paiements et dettes',
-        icone: Icons.shopping_cart,
-        permissions: ['achats.voir', 'achats.creer'],
-        ouvrir: (_) => const AchatsPage(),
-      ),
-      _bientot('Rapports', 'Rapports et finances', Icons.bar_chart, [
-        'rapports.voir',
-      ]),
-      _Module(
-        titre: 'Utilisateurs',
-        description: 'Comptes et affectation aux agences',
-        icone: Icons.people,
-        permissions: ['utilisateurs.gerer'],
-        ouvrir: (_) => const UtilisateursPage(),
-      ),
-      _Module(
-        titre: 'Rôles et droits',
-        description: 'Ce que chaque rôle peut faire',
-        icone: Icons.admin_panel_settings,
-        permissions: ['droits.gerer'],
-        ouvrir: (_) => const RolesDroitsPage(),
-      ),
-      _Module(
-        titre: 'Sauvegardes',
-        description: 'Copies de la base et restauration',
-        icone: Icons.backup,
-        permissions: ['sauvegardes.gerer'],
-        ouvrir: (_) => const SauvegardesPage(),
-      ),
-      _Module(
-        titre: 'Modes de paiement',
-        description: 'Espèces, mobile money, banque...',
-        icone: Icons.payments,
-        permissions: ['paiements.gerer'],
-        ouvrir: (_) => const ModesPaiementPage(),
-      ),
-      _Module(
-        titre: 'Plan comptable',
-        description: 'Comptes et import du plan',
-        icone: Icons.menu_book,
-        permissions: ['comptabilite.voir', 'comptabilite.gerer'],
-        ouvrir: (_) => const PlanComptablePage(),
-      ),
-      _Module(
-        titre: 'Associations comptables',
-        description: 'Quel compte pour chaque poste',
-        icone: Icons.account_tree,
-        permissions: ['comptabilite.voir', 'comptabilite.gerer'],
-        ouvrir: (_) => const AssociationsPage(),
-      ),
-      _Module(
-        titre: 'Licence',
-        description: 'Activation du logiciel',
-        icone: Icons.verified_user,
-        permissions: ['licence.gerer'],
-        ouvrir: (_) => const LicencePage(),
-      ),
-    ];
-
-    // On ne garde que ceux que l'utilisateur a le droit d'utiliser
-    final visibles = modules.where((m) => m.autorise).toList();
+    final visibles = construireModules().where((m) => m.autorise).toList();
 
     return Scaffold(
       appBar: AppBar(
+        automaticallyImplyLeading: false,
         title: Text(agence == null ? 'Accueil' : 'Accueil - ${agence.nom}'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.swap_horiz),
-            tooltip: "Changer d'agence",
-            onPressed: () {
-              Session.agenceCourante = null;
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(builder: (_) => const ApresConnexionPage()),
-              );
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Déconnexion',
-            onPressed: () {
-              Session.deconnecter();
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(builder: (_) => const LoginPage()),
-              );
-            },
-          ),
-        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
@@ -263,20 +52,8 @@ class HomePage extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 24),
-                if (visibles.isEmpty)
-                  const Text(
-                    "Aucune fonction n'est disponible pour votre rôle. "
-                    "Contactez l'administrateur.",
-                  )
-                else
-                  Wrap(
-                    spacing: 16,
-                    runSpacing: 16,
-                    children: visibles
-                        .map((m) => _CarteModule(module: m))
-                        .toList(),
-                  ),
-                const SizedBox(height: 24),
+
+                // Bandeau : sauvegarde ancienne
                 if (Session.peut('sauvegardes.gerer'))
                   FutureBuilder<StatutSauvegarde>(
                     future: BackupService.statut(),
@@ -308,7 +85,8 @@ class HomePage extends StatelessWidget {
                       );
                     },
                   ),
-                const SizedBox(height: 24),
+
+                // Bandeau : fin de la période d'essai
                 FutureBuilder<EtatLicence>(
                   future: LicenceService.verifier(),
                   builder: (context, snapshot) {
@@ -330,13 +108,30 @@ class HomePage extends StatelessWidget {
                           ),
                           title: Text(l.message),
                           subtitle: const Text(
-                            "Contactez votre fournisseur avec le code du poste (menu Licence).",
+                            'Contactez votre fournisseur avec le code du poste (menu Licence).',
                           ),
                         ),
                       ),
                     );
                   },
                 ),
+
+                if (visibles.isEmpty)
+                  const Text(
+                    "Aucune fonction n'est disponible pour votre rôle. "
+                    "Contactez l'administrateur.",
+                  )
+                else
+                  Wrap(
+                    spacing: 16,
+                    runSpacing: 16,
+                    children: visibles
+                        .map(
+                          (m) =>
+                              _CarteModule(module: m, onTap: () => onOuvrir(m)),
+                        )
+                        .toList(),
+                  ),
               ],
             ),
           ),
@@ -347,9 +142,10 @@ class HomePage extends StatelessWidget {
 }
 
 class _CarteModule extends StatelessWidget {
-  final _Module module;
+  final ModuleApp module;
+  final VoidCallback onTap;
 
-  const _CarteModule({required this.module});
+  const _CarteModule({required this.module, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -360,10 +156,7 @@ class _CarteModule extends StatelessWidget {
         elevation: 3,
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: module.ouvrir),
-          ),
+          onTap: onTap,
           child: Padding(
             padding: const EdgeInsets.all(12),
             child: Column(
@@ -373,6 +166,7 @@ class _CarteModule extends StatelessWidget {
                 const SizedBox(height: 8),
                 Text(
                   module.titre,
+                  textAlign: TextAlign.center,
                   style: const TextStyle(
                     fontSize: 17,
                     fontWeight: FontWeight.bold,

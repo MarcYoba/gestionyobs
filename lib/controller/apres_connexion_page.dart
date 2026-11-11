@@ -5,7 +5,7 @@ import 'creer_agence_page.dart';
 
 import 'package:gestionyobs/database/database_service.dart';
 
-import 'home_page.dart';
+import 'main_shell.dart';
 
 import 'package:gestionyobs/security/utilisateur.dart';
 
@@ -40,7 +40,9 @@ class _ApresConnexionPageState extends State<ApresConnexionPage> {
       } else if (agences.length == 1 && !utilisateur.estAdmin) {
         // Un vendeur avec une seule agence y entre directement
         Session.agenceCourante = agences.first;
-        _aller(const HomePage());
+        //_aller(const HomePage());
+        _aller(const MainShell());
+        MaterialPageRoute(builder: (_) => const MainShell());
       } else {
         // Dans les autres cas : liste de choix
         _aller(ChoixAgencePage(agences: agences));

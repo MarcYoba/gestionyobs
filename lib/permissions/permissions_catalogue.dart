@@ -146,6 +146,49 @@ const List<PermissionDef> cataloguePermissions = [
     'Administration',
     adminSeulement: true,
   ),
+  PermissionDef(
+    'depenses.voir',
+    'Consulter les dépenses (charges et autres dépenses)',
+    'Dépenses',
+  ),
+  PermissionDef(
+    'depenses.creer',
+    'Enregistrer une dépense (charge ou autre dépense)',
+    'Dépenses',
+  ),
+  PermissionDef(
+    'depenses.salaires',
+    'Voir et enregistrer les salaires',
+    'Dépenses',
+  ),
+  PermissionDef('reglements.annuler', 'Annuler un règlement', 'Règlements'),
+  PermissionDef('depenses.annuler', 'Annuler une dépense', 'Dépenses'),
+
+  PermissionDef(
+    'transferts.voir',
+    'Consulter les transferts de stock de son agence',
+    'Transferts',
+  ),
+  PermissionDef(
+    'transferts.demander',
+    'Demander un transfert de stock à une autre agence',
+    'Transferts',
+  ),
+  PermissionDef(
+    'transferts.valider',
+    'Accepter ou refuser une demande de transfert reçue',
+    'Transferts',
+  ),
+  PermissionDef(
+    'transferts.expedier',
+    'Expédier la marchandise d\'un transfert accepté',
+    'Transferts',
+  ),
+  PermissionDef(
+    'transferts.recevoir',
+    'Réceptionner la marchandise d\'un transfert',
+    'Transferts',
+  ),
 ];
 
 /// Les droits donnés au départ aux rôles de base (d'après le tableau validé).
