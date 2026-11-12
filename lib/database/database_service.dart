@@ -23,6 +23,7 @@ import 'package:gestionyobs/modules/annulation.dart';
 import 'package:gestionyobs/rapport/rapport.dart';
 import 'package:gestionyobs/modules/depense.dart';
 import 'package:gestionyobs/modules/transfert.dart';
+import 'package:gestionyobs/modules/caisse.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -64,7 +65,9 @@ class DatabaseService {
   // Version 18 : transferts de stock entre agences.
   //static const int _versionBase = 18;
   // mets ton ancienne version + 1
-  static const int _versionBase = 19;
+  //static const int _versionBase = 19;
+  // Version 20 : clôture de caisse.
+  static const int _versionBase = 20;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -109,6 +112,7 @@ class DatabaseService {
           await _creerTableDepenses(db);
           await _creerTablesTransferts(db);
           await _migrerAnnulationDepenses(db);
+          await _creerTablesCaisse(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -168,6 +172,9 @@ class DatabaseService {
           if (ancienneVersion < 19) {
             // le même numéro que ci-dessus
             await _migrerAnnulationDepenses(db);
+          }
+          if (ancienneVersion < 20) {
+            await _creerTablesCaisse(db);
           }
         },
       ),
@@ -5548,5 +5555,479 @@ class DatabaseService {
 
       return montant;
     });
+  }
+
+  // ---------- Caisse ----------
+
+  static Future<void> _creerTablesCaisse(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS clotures_caisse (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        agence_id INTEGER NOT NULL,
+        date_caisse TEXT NOT NULL,
+        fond_ouverture INTEGER NOT NULL,
+        entrees INTEGER NOT NULL,
+        sorties INTEGER NOT NULL,
+        theorique INTEGER NOT NULL,
+        compte INTEGER NOT NULL,
+        ecart INTEGER NOT NULL,
+        laisse INTEGER NOT NULL,
+        verse INTEGER NOT NULL,
+        note TEXT,
+        statut TEXT NOT NULL DEFAULT 'validee',
+        utilisateur_id INTEGER NOT NULL,
+        cree_le TEXT NOT NULL,
+        annule_le TEXT,
+        annule_par INTEGER,
+        motif_annulation TEXT,
+        FOREIGN KEY (agence_id) REFERENCES agences(id),
+        FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id)
+      )
+    ''');
+    // Une seule clôture valide par jour et par agence
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_cloture_jour
+      ON clotures_caisse (agence_id, date_caisse) WHERE statut = 'validee'
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS cloture_coupures (
+        cloture_id INTEGER NOT NULL,
+        valeur INTEGER NOT NULL,
+        quantite INTEGER NOT NULL,
+        PRIMARY KEY (cloture_id, valeur),
+        FOREIGN KEY (cloture_id) REFERENCES clotures_caisse(id) ON DELETE CASCADE
+      )
+    ''');
+  }
+
+  // Pour retrouver l'agence d'un paiement : elle est celle de son document
+  static const String _jointuresCaisse = '''
+    LEFT JOIN ventes v ON p.type_document = 'vente' AND v.id = p.document_id
+    LEFT JOIN achats a ON p.type_document = 'achat' AND a.id = p.document_id
+    LEFT JOIN depenses d ON p.type_document = 'depense' AND d.id = p.document_id
+  ''';
+  static const String _agenceDuPaiement =
+      'COALESCE(v.agence_id, a.agence_id, d.agence_id)';
+
+  static String _dateCaisseTexte(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  // Les mouvements de chaque mode de paiement, pour une agence et un jour
+  static Future<List<LigneModeCaisse>> _calculerCaisse(
+    DatabaseExecutor executeur,
+    int agenceId,
+    String jour,
+  ) async {
+    final modes = await executeur.rawQuery('SELECT * FROM modes_paiement');
+    final sommes = await executeur.rawQuery(
+      '''
+      SELECT p.mode_id AS mode_id,
+        SUM(CASE WHEN p.type_document = 'vente' AND p.montant > 0
+                  AND p.reglement_id IS NULL THEN p.montant ELSE 0 END) AS ventes,
+        SUM(CASE WHEN p.type_document = 'vente' AND p.montant > 0
+                  AND p.reglement_id IS NOT NULL THEN p.montant ELSE 0 END) AS reglements,
+        SUM(CASE WHEN p.type_document IN ('achat', 'depense') AND p.montant < 0
+                  THEN -p.montant ELSE 0 END) AS remb_recus,
+        SUM(CASE WHEN p.type_document = 'achat' AND p.montant > 0
+                  THEN p.montant ELSE 0 END) AS fournisseurs,
+        SUM(CASE WHEN p.type_document = 'depense' AND p.montant > 0
+                  THEN p.montant ELSE 0 END) AS depenses,
+        SUM(CASE WHEN p.type_document = 'vente' AND p.montant < 0
+                  THEN -p.montant ELSE 0 END) AS remb_clients
+      FROM paiements p
+      $_jointuresCaisse
+      WHERE p.date_paiement = ? AND $_agenceDuPaiement = ?
+      GROUP BY p.mode_id
+    ''',
+      [jour, agenceId],
+    );
+
+    final parMode = <int, Map<String, Object?>>{
+      for (final s in sommes) s['mode_id'] as int: s,
+    };
+    int n(Object? v) => v == null ? 0 : (v as num).toInt();
+
+    final lignes = <LigneModeCaisse>[];
+    for (final m in modes) {
+      final s = parMode[m['id'] as int];
+      if (s == null && m['actif'] != 1) continue;
+      lignes.add(
+        LigneModeCaisse(
+          modeId: m['id'] as int,
+          libelle: m['libelle'] as String,
+          type: (m['type'] as String?) ?? '',
+          ventes: n(s?['ventes']),
+          reglements: n(s?['reglements']),
+          rembRecus: n(s?['remb_recus']),
+          fournisseurs: n(s?['fournisseurs']),
+          depenses: n(s?['depenses']),
+          rembClients: n(s?['remb_clients']),
+        ),
+      );
+    }
+
+    // L'argent en caisse d'abord
+    lignes.sort((a, b) {
+      if (a.physique != b.physique) return a.physique ? -1 : 1;
+      return a.libelle.compareTo(b.libelle);
+    });
+    return lignes;
+  }
+
+  // Le premier jour avec des mouvements, entre deux dates, qui n'a pas été clôturé
+  static Future<DateTime?> _premierJourNonCloture(
+    DatabaseExecutor executeur,
+    int agenceId,
+    String apres,
+    String avant,
+  ) async {
+    final r = await executeur.rawQuery(
+      '''
+      SELECT MIN(p.date_paiement) AS jour
+      FROM paiements p
+      $_jointuresCaisse
+      WHERE p.date_paiement > ? AND p.date_paiement < ?
+        AND $_agenceDuPaiement = ?
+    ''',
+      [apres, avant, agenceId],
+    );
+    final jour = r.first['jour'] as String?;
+    return jour == null ? null : DateTime.parse(jour);
+  }
+
+  // Le journal du jour
+  static Future<List<MouvementCaisse>> _mouvementsCaisse(
+    int agenceId,
+    String jour,
+  ) async {
+    final peutSalaires = Session.peut('depenses.salaires');
+
+    final lignes = await db.rawQuery(
+      '''
+      SELECT p.cree_le, p.type_document, p.reglement_id, p.montant,
+             m.libelle AS mode, u.nom_complet AS utilisateur,
+             COALESCE(v.code, a.code, d.code) AS document,
+             COALESCE(tv.nom, ta.nom, d.libelle) AS libelle,
+             d.type AS depense_type
+      FROM paiements p
+      INNER JOIN modes_paiement m ON m.id = p.mode_id
+      INNER JOIN utilisateurs u ON u.id = p.utilisateur_id
+      $_jointuresCaisse
+      LEFT JOIN tiers tv ON tv.id = v.client_id
+      LEFT JOIN tiers ta ON ta.id = a.fournisseur_id
+      WHERE p.date_paiement = ? AND $_agenceDuPaiement = ?
+      ORDER BY p.id
+    ''',
+      [jour, agenceId],
+    );
+
+    return lignes.map((l) {
+      // Le montant d'un salaire se voit, pas son libellé
+      final secret = l['depense_type'] == 'salaire' && !peutSalaires;
+      return MouvementCaisse(
+        heure: DateTime.parse(l['cree_le'] as String),
+        typeDocument: l['type_document'] as String,
+        reglement: l['reglement_id'] != null,
+        montant: (l['montant'] as num).toInt(),
+        mode: l['mode'] as String,
+        document: (l['document'] as String?) ?? '',
+        libelle: secret
+            ? 'Dépense confidentielle'
+            : ((l['libelle'] as String?) ?? ''),
+        utilisateur: l['utilisateur'] as String,
+      );
+    }).toList();
+  }
+
+  static Future<JourCaisse> lireJourCaisse(DateTime date) async {
+    Session.exiger('caisse.voir');
+    final agence = _agenceObligatoire();
+    final jour = _dateCaisseTexte(date);
+
+    final modes = await _calculerCaisse(db, agence.id, jour);
+    final mouvements = await _mouvementsCaisse(agence.id, jour);
+
+    // La dernière clôture avant ce jour : le fond laissé pour aujourd'hui
+    final avant = await db.rawQuery(
+      '''
+      SELECT date_caisse, laisse FROM clotures_caisse
+      WHERE agence_id = ? AND statut = 'validee' AND date_caisse < ?
+      ORDER BY date_caisse DESC LIMIT 1
+    ''',
+      [agence.id, jour],
+    );
+
+    int? fondPrecedent;
+    DateTime? jourARegulariser;
+    if (avant.isNotEmpty) {
+      fondPrecedent = (avant.first['laisse'] as num).toInt();
+      jourARegulariser = await _premierJourNonCloture(
+        db,
+        agence.id,
+        avant.first['date_caisse'] as String,
+        jour,
+      );
+    }
+
+    // La clôture de ce jour, s'il y en a une
+    ClotureCaisse? cloture;
+    final c = await db.rawQuery(
+      '''
+      SELECT c.id, c.code, c.date_caisse, c.fond_ouverture, c.entrees, c.sorties,
+             c.theorique, c.compte, c.ecart, c.laisse, c.verse, c.note, c.cree_le,
+             u.nom_complet AS par
+      FROM clotures_caisse c
+      INNER JOIN utilisateurs u ON u.id = c.utilisateur_id
+      WHERE c.agence_id = ? AND c.date_caisse = ? AND c.statut = 'validee'
+    ''',
+      [agence.id, jour],
+    );
+    if (c.isNotEmpty) {
+      final e = c.first;
+      final coupures = await db.query(
+        'cloture_coupures',
+        where: 'cloture_id = ?',
+        whereArgs: [e['id']],
+      );
+      final apres = await db.rawQuery(
+        '''
+        SELECT COUNT(*) AS n FROM paiements p
+        $_jointuresCaisse
+        WHERE p.date_paiement = ? AND $_agenceDuPaiement = ? AND p.cree_le > ?
+      ''',
+        [jour, agence.id, e['cree_le']],
+      );
+
+      cloture = ClotureCaisse(
+        id: e['id'] as int,
+        code: e['code'] as String,
+        dateCaisse: DateTime.parse(e['date_caisse'] as String),
+        fondOuverture: (e['fond_ouverture'] as num).toInt(),
+        entrees: (e['entrees'] as num).toInt(),
+        sorties: (e['sorties'] as num).toInt(),
+        theorique: (e['theorique'] as num).toInt(),
+        compte: (e['compte'] as num).toInt(),
+        ecart: (e['ecart'] as num).toInt(),
+        laisse: (e['laisse'] as num).toInt(),
+        verse: (e['verse'] as num).toInt(),
+        note: e['note'] as String?,
+        par: e['par'] as String,
+        creeLe: DateTime.parse(e['cree_le'] as String),
+        coupures: {
+          for (final k in coupures)
+            (k['valeur'] as num).toInt(): (k['quantite'] as num).toInt(),
+        },
+        mouvementsApres: (apres.first['n'] as num).toInt(),
+      );
+    }
+
+    return JourCaisse(
+      date: DateTime(date.year, date.month, date.day),
+      agence: agence.nom,
+      modes: modes,
+      mouvements: mouvements,
+      fondPrecedent: fondPrecedent,
+      jourARegulariser: jourARegulariser,
+      cloture: cloture,
+    );
+  }
+
+  // Clôture la journée : le théorique est recalculé ici, dans la transaction
+  static Future<String> cloturerCaisse({
+    required DateTime date,
+    required Map<int, int> coupures, // valeur -> quantité
+    required int laisse,
+    int fondInitial = 0, // seulement pour la toute première clôture
+    String? note,
+  }) async {
+    Session.exiger('caisse.cloturer');
+    final agence = _agenceObligatoire();
+    final utilisateur = Session.utilisateurCourant!;
+    final jour = _dateCaisseTexte(date);
+
+    if (jour.compareTo(_dateCaisseTexte(DateTime.now())) > 0) {
+      throw Exception(
+        'On ne peut pas clôturer un jour qui n\'est pas encore arrivé',
+      );
+    }
+    for (final e in coupures.entries) {
+      if (!coupuresCaisse.contains(e.key) || e.value < 0) {
+        throw Exception('Comptage invalide');
+      }
+    }
+    if (laisse < 0) throw Exception('Le montant laissé en caisse est invalide');
+
+    return db.transaction((txn) async {
+      final deja = await txn.query(
+        'clotures_caisse',
+        where: "agence_id = ? AND date_caisse = ? AND statut = 'validee'",
+        whereArgs: [agence.id, jour],
+        limit: 1,
+      );
+      if (deja.isNotEmpty) throw Exception('Cette journée est déjà clôturée');
+
+      // Le fond d'ouverture : ce qu'a laissé la clôture précédente
+      final avant = await txn.rawQuery(
+        '''
+        SELECT date_caisse, laisse FROM clotures_caisse
+        WHERE agence_id = ? AND statut = 'validee' AND date_caisse < ?
+        ORDER BY date_caisse DESC LIMIT 1
+      ''',
+        [agence.id, jour],
+      );
+
+      int fond;
+      if (avant.isNotEmpty) {
+        fond = (avant.first['laisse'] as num).toInt();
+        final aRegulariser = await _premierJourNonCloture(
+          txn,
+          agence.id,
+          avant.first['date_caisse'] as String,
+          jour,
+        );
+        if (aRegulariser != null) {
+          throw Exception(
+            'Clôturez d\'abord la journée du ${formaterDate(aRegulariser)}',
+          );
+        }
+      } else {
+        if (fondInitial < 0) throw Exception('Le fond de caisse est invalide');
+        fond = fondInitial;
+      }
+
+      // Le théorique, recalculé depuis les paiements
+      final modes = await _calculerCaisse(txn, agence.id, jour);
+      final physiques = modes.where((m) => m.physique);
+      final entrees = physiques.fold(0, (s, m) => s + m.entrees);
+      final sorties = physiques.fold(0, (s, m) => s + m.sorties);
+      final theorique = fond + entrees - sorties;
+
+      final compte = coupures.entries.fold(0, (s, e) => s + e.key * e.value);
+      final ecart = compte - theorique;
+
+      final noteTexte = _videEnNull(note);
+      if (ecart != 0 && (noteTexte == null || noteTexte.length < 5)) {
+        throw Exception(
+          'Il y a un écart de ${formaterPrix(ecart)} : '
+          'expliquez-le dans la note (5 caractères minimum)',
+        );
+      }
+      if (laisse > compte) {
+        throw Exception(
+          'Le montant laissé en caisse ne peut pas dépasser le montant compté',
+        );
+      }
+
+      final code = await _prochainMatricule(txn, 'clotures_caisse');
+      final clotureId = await txn.insert('clotures_caisse', {
+        'code': code,
+        'agence_id': agence.id,
+        'date_caisse': jour,
+        'fond_ouverture': fond,
+        'entrees': entrees,
+        'sorties': sorties,
+        'theorique': theorique,
+        'compte': compte,
+        'ecart': ecart,
+        'laisse': laisse,
+        'verse': compte - laisse,
+        'note': noteTexte,
+        'statut': 'validee',
+        'utilisateur_id': utilisateur.id,
+        'cree_le': DateTime.now().toIso8601String(),
+      });
+
+      for (final e in coupures.entries) {
+        if (e.value > 0) {
+          await txn.insert('cloture_coupures', {
+            'cloture_id': clotureId,
+            'valeur': e.key,
+            'quantite': e.value,
+          });
+        }
+      }
+
+      return code;
+    });
+  }
+
+  // Annule la dernière clôture de l'agence
+  static Future<void> rouvrirCloture(int id, String motif) async {
+    Session.exiger('caisse.rouvrir');
+    final agence = _agenceObligatoire();
+    final utilisateur = Session.utilisateurCourant!;
+    final raison = _texteObligatoire(
+      motif,
+      'Indiquez le motif (5 caractères minimum)',
+    );
+
+    await db.transaction((txn) async {
+      final r = await txn.query(
+        'clotures_caisse',
+        where: 'id = ? AND agence_id = ?',
+        whereArgs: [id, agence.id],
+        limit: 1,
+      );
+      if (r.isEmpty) throw Exception('Clôture introuvable');
+      if (r.first['statut'] != 'validee') {
+        throw Exception('Cette clôture est déjà annulée');
+      }
+
+      final plusRecentes = await txn.rawQuery(
+        '''
+        SELECT COUNT(*) AS n FROM clotures_caisse
+        WHERE agence_id = ? AND statut = 'validee' AND date_caisse > ?
+      ''',
+        [agence.id, r.first['date_caisse']],
+      );
+      if ((plusRecentes.first['n'] as num).toInt() > 0) {
+        throw Exception('Seule la dernière clôture peut être rouverte');
+      }
+
+      await txn.update(
+        'clotures_caisse',
+        {
+          'statut': 'annulee',
+          'annule_le': DateTime.now().toIso8601String(),
+          'annule_par': utilisateur.id,
+          'motif_annulation': raison,
+        },
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    });
+  }
+
+  static Future<List<ClotureResume>> listerClotures() async {
+    Session.exiger('caisse.voir');
+    final agence = _agenceObligatoire();
+
+    final lignes = await db.rawQuery(
+      '''
+      SELECT c.id, c.code, c.date_caisse, c.theorique, c.compte, c.ecart,
+             u.nom_complet AS par
+      FROM clotures_caisse c
+      INNER JOIN utilisateurs u ON u.id = c.utilisateur_id
+      WHERE c.agence_id = ? AND c.statut = 'validee'
+      ORDER BY c.date_caisse DESC
+      LIMIT 90
+    ''',
+      [agence.id],
+    );
+
+    return lignes
+        .map(
+          (l) => ClotureResume(
+            id: l['id'] as int,
+            code: l['code'] as String,
+            dateCaisse: DateTime.parse(l['date_caisse'] as String),
+            theorique: (l['theorique'] as num).toInt(),
+            compte: (l['compte'] as num).toInt(),
+            ecart: (l['ecart'] as num).toInt(),
+            par: l['par'] as String,
+          ),
+        )
+        .toList();
   }
 }

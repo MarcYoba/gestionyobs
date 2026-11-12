@@ -19,7 +19,7 @@ import 'package:gestionyobs/page/licence_page.dart';
 import 'package:gestionyobs/page/rapports_page.dart';
 import 'package:gestionyobs/page/depenses_page.dart';
 import 'package:gestionyobs/page/transferts_page.dart';
-
+import 'package:gestionyobs/page/caisse_page.dart';
 import 'package:gestionyobs/controller/utilisateurs_page.dart';
 
 /// Un module du logiciel : une entrée de la barre et une carte de l'accueil.
@@ -84,6 +84,13 @@ List<ModuleApp> construireModules() {
         'reglements.fournisseurs',
       ],
       ouvrir: (_) => const ReglementsPage(),
+    ),
+    ModuleApp(
+      titre: 'Caisse',
+      description: 'Comptage du soir, écarts et journal du jour',
+      icone: Icons.point_of_sale,
+      permissions: ['caisse.voir'],
+      ouvrir: (_) => const CaissePage(),
     ),
     ModuleApp(
       titre: 'Dépenses',
