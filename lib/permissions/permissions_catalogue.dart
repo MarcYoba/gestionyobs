@@ -189,6 +189,9 @@ const List<PermissionDef> cataloguePermissions = [
     'Réceptionner la marchandise d\'un transfert',
     'Transferts',
   ),
+  PermissionDef('caisse.voir', 'Consulter la caisse et le journal du jour', 'Caisse'),
+  PermissionDef('caisse.cloturer', 'Clôturer la caisse (comptage du soir)', 'Caisse'),
+  PermissionDef('caisse.rouvrir', 'Rouvrir la dernière clôture de caisse', 'Caisse'),
 ];
 
 /// Les droits donnés au départ aux rôles de base (d'après le tableau validé).

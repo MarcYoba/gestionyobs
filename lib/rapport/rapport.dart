@@ -391,6 +391,7 @@ class TableauRapport {
   final List<int> flex; // largeurs relatives des colonnes
   final Set<int> droite; // colonnes alignées à droite (les nombres)
   final String? note;
+  final Set<int> lignesGras;
 
   const TableauRapport({
     required this.titre,
@@ -400,6 +401,7 @@ class TableauRapport {
     required this.flex,
     this.droite = const {},
     this.note,
+    this.lignesGras = const {},
   });
 }
 
