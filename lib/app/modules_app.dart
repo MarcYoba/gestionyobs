@@ -21,6 +21,7 @@ import 'package:gestionyobs/page/depenses_page.dart';
 import 'package:gestionyobs/page/transferts_page.dart';
 import 'package:gestionyobs/page/caisse_page.dart';
 import 'package:gestionyobs/controller/utilisateurs_page.dart';
+import 'package:gestionyobs/page/comptabilite_page.dart';
 
 /// Un module du logiciel : une entrée de la barre et une carte de l'accueil.
 class ModuleApp {
@@ -186,6 +187,13 @@ List<ModuleApp> construireModules() {
       icone: Icons.account_tree,
       permissions: ['comptabilite.voir', 'comptabilite.gerer'],
       ouvrir: (_) => const AssociationsPage(),
+    ),
+    ModuleApp(
+      titre: 'Comptabilité',
+      description: 'Journal, grand livre et balance',
+      icone: Icons.menu_book,
+      permissions: ['comptabilite.voir', 'comptabilite.gerer'],
+      ouvrir: (_) => const ComptabilitePage(),
     ),
     ModuleApp(
       titre: 'Utilisateurs',
