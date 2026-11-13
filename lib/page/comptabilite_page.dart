@@ -8,6 +8,8 @@ import 'package:gestionyobs/page/etat_comptable_page.dart';
 import 'package:gestionyobs/modules/stock.dart';
 import 'package:gestionyobs/security/utilisateur.dart';
 
+import 'etats_financiers_page.dart';
+
 class ComptabilitePage extends StatefulWidget {
   const ComptabilitePage({super.key});
 
@@ -237,6 +239,27 @@ class _ComptabilitePageState extends State<ComptabilitePage> {
                       'Balance',
                       'Le report, les mouvements et le solde de chaque compte',
                       'balance',
+                    ),
+                    Card(
+                      child: ListTile(
+                        leading: const Icon(
+                          Icons.assessment,
+                          size: 34,
+                          color: Colors.green,
+                        ),
+                        title: const Text(
+                          'États financiers',
+                          style: TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        subtitle: const Text(
+                          'Bilan (actif et passif) et compte de résultat',
+                        ),
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: () => _ouvrir(const EtatsFinanciersPage()),
+                      ),
                     ),
                     const SizedBox(height: 12),
                     const Text(

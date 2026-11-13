@@ -14,6 +14,7 @@ class ComptaPdf {
     required InfosEntreprise infos,
     required String auteur,
     bool paysage = false,
+    bool sautDePage = false,
   }) async {
     final document = pw.Document(title: titre, author: auteur);
 
@@ -127,6 +128,7 @@ class ComptaPdf {
           ),
           pw.Divider(thickness: 0.8),
           for (final t in tableaux) ...[
+            if (sautDePage && !identical(t, tableaux.first)) pw.NewPage(),
             pw.SizedBox(height: 12),
             if (tableaux.length > 1 || t.titre != titre)
               pw.Padding(

@@ -25,6 +25,7 @@ import 'package:gestionyobs/modules/depense.dart';
 import 'package:gestionyobs/modules/transfert.dart';
 import 'package:gestionyobs/modules/caisse.dart';
 import 'package:gestionyobs/comptabilite/compta.dart';
+import 'package:gestionyobs/comptabilite/etats_financiers.dart';
 
 /// Gère la base de données SQLite.
 /// Gère la base de données SQLite.
@@ -70,7 +71,9 @@ class DatabaseService {
   // Version 20 : clôture de caisse.
   //static const int _versionBase = 20;
   // Version 20 : écritures comptables.
-  static const int _versionBase = 21;
+  //static const int _versionBase = 21;
+  // Version 21 : règles de calcul des états financiers.
+  static const int _versionBase = 22;
 
   // Ouvre la base (et la crée ou la met à jour si besoin)
   static Future<void> ouvrir(AppConfig config) async {
@@ -117,6 +120,7 @@ class DatabaseService {
           await _migrerAnnulationDepenses(db);
           await _creerTablesCaisse(db);
           await _creerTablesEcritures(db);
+          await _creerTableEtatsFormules(db);
         },
         onUpgrade: (db, ancienneVersion, nouvelleVersion) async {
           if (ancienneVersion < 2) {
@@ -182,6 +186,9 @@ class DatabaseService {
           }
           if (ancienneVersion < 21) {
             await _creerTablesEcritures(db);
+          }
+          if (ancienneVersion < 22) {
+            await _creerTableEtatsFormules(db);
           }
         },
       ),
@@ -6859,6 +6866,183 @@ class DatabaseService {
             ),
           )
           .toList(),
+    );
+  }
+
+  // ---------- États financiers ----------
+
+  static Future<void> _creerTableEtatsFormules(Database db) async {
+    // Seules les formules modifiées sont enregistrées : les autres
+    // viennent du logiciel.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS etats_formules (
+        etat TEXT NOT NULL,
+        ref TEXT NOT NULL,
+        colonne TEXT NOT NULL,
+        formule TEXT NOT NULL,
+        modifie_le TEXT NOT NULL,
+        modifie_par INTEGER NOT NULL,
+        PRIMARY KEY (etat, ref, colonne)
+      )
+    ''');
+  }
+
+  // Les formules personnalisées : 'etat|ref|colonne' -> formule
+  static Future<Map<String, String>> lireFormulesEtats() async {
+    _exigerVueCompta();
+    final lignes = await db.query('etats_formules');
+    return {
+      for (final l in lignes)
+        '${l['etat']}|${l['ref']}|${l['colonne']}': l['formule'] as String,
+    };
+  }
+
+  static Future<void> enregistrerFormuleEtat({
+    required String etat,
+    required String ref,
+    required String colonne, // 'brut', 'amort' ou 'net'
+    required String formule,
+  }) async {
+    Session.exiger('comptabilite.gerer');
+
+    if (!nomsEtats.containsKey(etat)) throw Exception('État inconnu');
+    if (!lignesDeEtat(etat).any((l) => l.ref == ref)) {
+      throw Exception('Ligne inconnue');
+    }
+    if (colonne != 'brut' && colonne != 'amort' && colonne != 'net') {
+      throw Exception('Colonne inconnue');
+    }
+
+    final erreur = validerFormule(formule, videAutorise: colonne == 'amort');
+    if (erreur != null) throw Exception(erreur);
+
+    final propre = formule.trim();
+    final defaut = (formuleParDefaut(etat, ref, colonne) ?? '').trim();
+
+    if (propre == defaut) {
+      await db.delete(
+        'etats_formules',
+        where: 'etat = ? AND ref = ? AND colonne = ?',
+        whereArgs: [etat, ref, colonne],
+      );
+      return;
+    }
+
+    await db.execute(
+      '''
+      INSERT INTO etats_formules (etat, ref, colonne, formule, modifie_le, modifie_par)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(etat, ref, colonne) DO UPDATE SET
+        formule = excluded.formule,
+        modifie_le = excluded.modifie_le,
+        modifie_par = excluded.modifie_par
+    ''',
+      [
+        etat,
+        ref,
+        colonne,
+        propre,
+        DateTime.now().toIso8601String(),
+        Session.utilisateurCourant!.id,
+      ],
+    );
+  }
+
+  // Revient aux formules d'origine pour une ligne
+  static Future<void> retablirFormuleEtat(String etat, String ref) async {
+    Session.exiger('comptabilite.gerer');
+    await db.delete(
+      'etats_formules',
+      where: 'etat = ? AND ref = ?',
+      whereArgs: [etat, ref],
+    );
+  }
+
+  // Les soldes (débit - crédit) de chaque compte selon une condition de date
+  static Future<Map<String, int>> _soldesPar(
+    String condition,
+    List<Object> args,
+    int? agenceId,
+  ) async {
+    final filtre = agenceId == null ? '' : ' AND e.agence_id = ?';
+    final lignes = await db.rawQuery(
+      '''
+      SELECT l.compte_numero AS numero, SUM(l.debit) - SUM(l.credit) AS solde
+      FROM ecriture_lignes l
+      INNER JOIN ecritures e ON e.id = l.ecriture_id
+      WHERE $condition$filtre
+      GROUP BY l.compte_numero
+    ''',
+      [...args, if (agenceId != null) agenceId],
+    );
+
+    return {
+      for (final l in lignes)
+        l['numero'] as String: (l['solde'] as num).toInt(),
+    };
+  }
+
+  static Future<EtatsFinanciers> calculerEtatsFinanciers({
+    required DateTime debut,
+    required DateTime fin,
+    bool toutesAgences = false,
+  }) async {
+    _exigerVueCompta();
+    final agenceId = _agencePorteeCompta(toutesAgences);
+    await _comptabiliserSilencieux();
+
+    final formules = await lireFormulesEtats();
+
+    final noms = await db.rawQuery('''
+      SELECT compte_numero AS numero, MAX(compte_intitule) AS intitule
+      FROM ecriture_lignes GROUP BY compte_numero
+    ''');
+    final intitules = {
+      for (final n in noms) n['numero'] as String: n['intitule'] as String,
+    };
+
+    // Un exercice : le bilan à la date de fin, le résultat sur la période
+    Future<EtatCalcule> exercice(DateTime d, DateTime f) async {
+      final cumul = await _soldesPar('e.date_ecriture <= ?', [
+        _dateCaisseTexte(f),
+      ], agenceId);
+      final flux = await _soldesPar('e.date_ecriture BETWEEN ? AND ?', [
+        _dateCaisseTexte(d),
+        _dateCaisseTexte(f),
+      ], agenceId);
+      final avant = await _soldesPar('e.date_ecriture < ?', [
+        _dateCaisseTexte(d),
+      ], agenceId);
+
+      // Le résultat des exercices précédents (produits - charges, classes 6 à 8)
+      var anterieur = 0;
+      avant.forEach((numero, solde) {
+        if (numero.isNotEmpty && '678'.contains(numero[0])) anterieur -= solde;
+      });
+
+      return calculerColonneEtats(
+        cumul: cumul,
+        flux: flux,
+        resultatAnterieur: anterieur,
+        personnalisees: formules,
+        intitules: intitules,
+      );
+    }
+
+    // L'exercice précédent : la même durée, juste avant
+    final debutPrec = DateTime(debut.year - 1, debut.month, debut.day);
+    final finPrec = DateTime(debut.year, debut.month, debut.day - 1);
+
+    return EtatsFinanciers(
+      debut: debut,
+      fin: fin,
+      debutPrec: debutPrec,
+      finPrec: finPrec,
+      portee: toutesAgences
+          ? 'Toutes les agences'
+          : 'Agence ${Session.agenceCourante?.nom ?? ''}',
+      n: await exercice(debut, fin),
+      p: await exercice(debutPrec, finPrec),
     );
   }
 }
